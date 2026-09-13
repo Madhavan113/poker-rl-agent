@@ -23,7 +23,11 @@ packages = ["src/exsolver"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra --strict-markers"
+markers = [
+  "ground_truth: independent analytic/reference values the code must reproduce (truth/)",
+  "slow: takes more than ~30 s",
+]
 
 [tool.ruff]
 target-version = "py312"
@@ -32,3 +36,11 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

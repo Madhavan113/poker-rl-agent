@@ -1,0 +1,12 @@
+{
+  "game": "leduc",
+  "status": "corroborated",
+  "provenance": [
+    "OpenSpiel leduc_poker (Lanctot et al. 2019), default parameters: 6 cards, ante 1, bet 2 in round 1 and 4 in round 2, at most 2 raises per round; 936 information states; CFR seat-0 value about -0.0856. Recalled from OpenSpiel; independent run with version pending."
+  ],
+  "n_infosets": 936,
+  "max_result": 13,
+  "game_value_seat0": -0.0856,
+  "cfr_plus": {"iterations": 1000},
+  "tolerances": {"cfr_value": 2e-3, "cfr_exploitability": 2e-3}
+}

@@ -1,0 +1,31 @@
+name: review-gate
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  review-gate:
+    name: review-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Drop stale approval when new commits arrive
+        if: github.event.action == 'synchronize'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr edit "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" \
+            --remove-label "review: approved" || true
+          echo "New commits: the independent review must be redone (docs/CODE_REVIEW.md)."
+          exit 1
+      - name: Require the independent-review approval label
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          case ",$LABELS," in
+            *",review: approved,"*) echo "Independent review approved."; exit 0 ;;
+          esac
+          echo "Missing label 'review: approved'. It is added only after the independent review"
+          echo "checklist in docs/CODE_REVIEW.md is complete and every blocking finding is resolved."
+          exit 1
