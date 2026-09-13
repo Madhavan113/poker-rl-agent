@@ -1,12 +1,15 @@
-"""Leduc ground truth from OpenSpiel's reference implementation (see truth/leduc.json)."""
+"""Leduc ground truth from OpenSpiel 2.0.2's reference implementation (see truth/leduc.json)."""
 
 import pytest
 
+from tests.conftest import require_module
+
 pytestmark = pytest.mark.ground_truth
 
-leduc_mod = pytest.importorskip("exsolver.games.leduc")
-br_mod = pytest.importorskip("exsolver.solvers.best_response")
-cfr_mod = pytest.importorskip("exsolver.solvers.cfr")
+leduc_mod = require_module("exsolver.games.leduc")
+br_mod = require_module("exsolver.solvers.best_response")
+cfr_mod = require_module("exsolver.solvers.cfr")
+strategy_mod = require_module("exsolver.strategy")
 
 
 @pytest.fixture(scope="module")
@@ -15,9 +18,7 @@ def game():
 
 
 def test_infoset_count(game, truth):
-    from exsolver.strategy import enumerate_infosets
-
-    assert len(enumerate_infosets(game)) == truth("leduc")["n_infosets"]
+    assert len(strategy_mod.enumerate_infosets(game)) == truth("leduc")["n_infosets"]
 
 
 def test_max_result(game, truth):

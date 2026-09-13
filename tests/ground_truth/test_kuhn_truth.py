@@ -7,12 +7,15 @@ the engine's own test-suite, and take their expected values from truth/kuhn.json
 import numpy as np
 import pytest
 
+from tests.conftest import require_module
+
 pytestmark = pytest.mark.ground_truth
 
-kuhn_mod = pytest.importorskip("exsolver.games.kuhn")
-br_mod = pytest.importorskip("exsolver.solvers.best_response")
-cfr_mod = pytest.importorskip("exsolver.solvers.cfr")
-prior_mod = pytest.importorskip("exsolver.population.kuhn_prior")
+kuhn_mod = require_module("exsolver.games.kuhn")
+br_mod = require_module("exsolver.solvers.best_response")
+cfr_mod = require_module("exsolver.solvers.cfr")
+prior_mod = require_module("exsolver.population.kuhn_prior")
+strategy_mod = require_module("exsolver.strategy")
 
 
 @pytest.fixture(scope="module")
@@ -25,9 +28,7 @@ def test_param_order_matches_truth(truth):
 
 
 def test_infoset_count(game, truth):
-    from exsolver.strategy import enumerate_infosets
-
-    assert len(enumerate_infosets(game)) == truth("kuhn")["n_infosets"]
+    assert len(strategy_mod.enumerate_infosets(game)) == truth("kuhn")["n_infosets"]
 
 
 @pytest.mark.parametrize("idx", [0, 1, 2])
