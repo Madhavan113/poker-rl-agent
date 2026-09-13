@@ -67,27 +67,42 @@ class Game(Protocol):
     def card_name(self, c: int) -> str
     def deal(self, rng, seat_cards: ... ) -> State       # convenience: resolve chance with rng
     def state_from_deal(self, cards0, cards1, board=()) -> State  # deterministic deal for posterior replay
+
+# exsolver/games/kuhn.py, exsolver/games/leduc.py
+class KuhnPoker:    # implements Game; spec.name == "kuhn"
+class LeducPoker:   # implements Game; spec.name == "leduc"
 ```
 
-`State` is immutable (frozen dataclass or tuple). Infoset key format is
-`"{seat}:{cards}|{history}"` where `history` uses `c` for CALL, `b` for RAISE, `f` for FOLD;
-rounds are separated by `/` and the board card is appended after the separator in Leduc, e.g.
-Kuhn `"0:K|"`, `"0:Q|cb"`, `"1:J|c"`, `"1:K|b"`; Leduc `"1:Qs|cb/Kh|c"`.
+`State` is immutable (frozen dataclass or tuple). Infoset keys are `"{seat}:{cards}|{history}"`
+where `history` uses `c` for CALL, `b` for RAISE, `f` for FOLD. Kuhn: `"0:K|"`, `"0:Q|cb"`,
+`"1:J|c"`, `"1:K|b"`. Leduc, once the board is dealt, is
+`"{seat}:{card}|{round1}/{board}|{round2}"`, e.g. `"1:Qs|cbc/Kh|c"` (seat 1 holding Q♠; round 1
+went check, bet, call; board K♥; seat 0 checked to open round 2); during round 1 the key is just
+`"{seat}:{card}|{round1}"`, e.g. `"0:Kh|b"`. Card names are rank then suit; card index =
+rank·2 + suit with J, Q, K = 0, 1, 2 and s, h = 0, 1: Js=0, Jh=1, Qs=2, Qh=3, Ks=4, Kh=5.
 
 ```python
 # exsolver/strategy.py
 TabularStrategy = dict[str, np.ndarray]   # infoset key -> probs over (FOLD, CALL, RAISE)
+def enumerate_infosets(game) -> dict[str, list[Action]]
+    # every infoset key of both seats -> legal actions there (Kuhn 12 keys, Leduc 936)
 
-# exsolver/solvers/
+# exsolver/solvers/cfr.py
 def cfr_plus(game, iterations: int) -> TabularStrategy           # average strategy, both seats
+
+# exsolver/solvers/best_response.py
 def best_response(game, opponent: TabularStrategy, br_seat: int) -> tuple[TabularStrategy, float]
     # exact BR for br_seat vs opponent's other-seat entries; returns (pure-ish BR, EV for br_seat)
+def best_response_value(game, opponent: TabularStrategy, br_seat: int) -> float
+    # the EV component of best_response
 def expected_value(game, strat_seat0: TabularStrategy, strat_seat1: TabularStrategy) -> float
     # exact EV for seat 0
 def exploitability(game, profile: TabularStrategy) -> float
     # (BR value vs seat0 + BR value vs seat1) / 2, i.e. NashConv/2 ; 0 at equilibrium
 def seat_exploitability(game, strat: TabularStrategy, seat: int, game_value_seat0: float) -> float
     # how much an omniscient opponent gains over their equilibrium value against `strat` at `seat`
+
+# exsolver/solvers/mixture.py
 def mix_strategies(game, weights: np.ndarray, profiles: list[TabularStrategy], seat: int) -> TabularStrategy
     # realization-equivalent behavioural mixture (sequence-form average) of profiles' `seat` entries
 ```
@@ -95,21 +110,26 @@ def mix_strategies(game, weights: np.ndarray, profiles: list[TabularStrategy], s
 `mix_strategies` must satisfy `expected_value(σ, mix) == Σ w_i expected_value(σ, θ_i)` for any σ.
 
 ```python
-# exsolver/population/  (the prior; see RESEARCH.md "The prior")
+# exsolver/population/kuhn_prior.py  (the prior; see RESEARCH.md "The prior")
 @dataclass
 class KuhnPrior:                   # generative prior over 12-dim θ; archetype mixture with Beta noise
     def sample(self, rng) -> tuple[TabularStrategy, np.ndarray, int]   # (profile, theta[12], archetype_id)
 def theta_to_profile(theta: np.ndarray) -> TabularStrategy
 def profile_to_theta(profile: TabularStrategy) -> np.ndarray
+def nash_theta(alpha: float) -> np.ndarray   # θ of the Nash-family member with parameter α ∈ [0, 1/3]
 KUHN_PARAM_NAMES: list[str]        # 12 names, fixed order:
   # ["0:J|", "0:Q|", "0:K|",        P(RAISE) at seat-0 root
   #  "0:J|cb", "0:Q|cb", "0:K|cb",  P(CALL) facing bet after checking
   #  "1:J|c", "1:Q|c", "1:K|c",     P(RAISE) after opponent checks
   #  "1:J|b", "1:Q|b", "1:K|b"]     P(CALL) facing bet
+
+# exsolver/population/population.py
 @dataclass
 class Population:                  # discrete population = the prior for E1a
     profiles: list[TabularStrategy]; thetas: np.ndarray [M,12]; archetypes: np.ndarray [M]; weights: np.ndarray [M]
     def save(path) / load(path)    # .npz
+def sample_population(prior: KuhnPrior, m: int, rng: np.random.Generator) -> Population
+    # M draws from the prior (E1a: M = 256, seed 0)
 ```
 
 ```python

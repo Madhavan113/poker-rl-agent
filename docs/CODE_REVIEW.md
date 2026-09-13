@@ -1,7 +1,7 @@
 # Code review policy
 
 Every PR gets an **independent review**: performed by a person or agent who did not write the
-code and has not seen the author's reasoning, working from the spec and the diff alone. The
+code and works from the spec and the diff, reading the PR summary only for the claimed scope. The
 reviewer runs `scripts/preflight.sh` themselves; a green CI is the floor, not the review.
 
 ## Reviewer procedure
@@ -14,9 +14,19 @@ reviewer runs `scripts/preflight.sh` themselves; a green CI is the floor, not th
 4. Report findings ranked by severity. Each finding names file and line, states the defect in
    one sentence, and gives a concrete failing input or scenario. No style-only findings unless
    they hide a bug.
-5. Verdict: **approve** (add label `review: approved`), or **changes requested** (add label
-   `review: changes requested`, comment with the findings). Re-review after fixes covers the
-   delta and re-runs the preflight.
+5. Verdict, recorded on the PR in the form the `review-gate` check verifies against the live PR
+   state (labels and comments, not the event payload):
+   - **approve**: post a comment containing a line that is exactly
+     `REVIEW-APPROVED <full 40-character head sha>` (the PR's head commit as shown by GitHub or
+     `git rev-parse HEAD` on the reviewed checkout), then swap the labels: add `review: approved`
+     and remove `review: changes requested`. Post the comment first; the label change re-runs the
+     gate, which looks for the comment.
+   - **changes requested**: the reverse. Post the findings as a comment, add
+     `review: changes requested` and remove `review: approved`.
+   The gate also requires the `ground-truth` label when the diff touches `truth/` or
+   `tests/ground_truth/`. Any new commit removes `review: approved` and fails the gate; the
+   re-review covers the delta, re-runs the preflight and ends with a new
+   `REVIEW-APPROVED <new head sha>` comment.
 
 ## Checklist
 
@@ -24,6 +34,9 @@ Blocking categories:
 
 - **Ground truth.** Any disagreement with `truth/`, or a test that was loosened, deleted or
   tolerances widened to pass.
+- **Process files.** Any change under `.github/`, `scripts/`, `truth/` or `tests/ground_truth/`.
+  Workflows run from the PR branch, so these files define the checks that judge the PR itself;
+  read every changed line (see "Trust model" in `CONTRIBUTING.md`).
 - **Spec deviation** not declared in the PR.
 - **Information leakage.** In this project the cardinal sin: an agent, tokenizer, or evaluator
   that can see the opponent's parameters, hidden cards, or the label at a point where the spec
