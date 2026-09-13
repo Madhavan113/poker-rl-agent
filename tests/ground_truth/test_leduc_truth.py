@@ -21,6 +21,19 @@ def test_infoset_count(game, truth):
     assert len(strategy_mod.enumerate_infosets(game)) == truth("leduc")["n_infosets"]
 
 
+def test_terminal_history_count(game, truth):
+    """Walk the tree through the Game API only (not games/tree.py) and count terminal histories."""
+
+    def count_terminals(state) -> int:
+        if game.is_terminal(state):
+            return 1
+        if game.is_chance(state):
+            return sum(count_terminals(child) for child, _prob in game.chance_outcomes(state))
+        return sum(count_terminals(game.apply(state, a)) for a in game.legal_actions(state))
+
+    assert count_terminals(game.root()) == truth("leduc")["n_terminals"]
+
+
 def test_max_result(game, truth):
     assert game.spec.max_result == truth("leduc")["max_result"]
 

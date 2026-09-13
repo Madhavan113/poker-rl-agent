@@ -1,0 +1,13 @@
+Downloading open-spiel (12.3MiB)
+Downloading scipy (19.5MiB)
+ Downloaded open-spiel
+ Downloaded scipy
+Installed 7 packages in 58ms
+open_spiel version 2.0.2
+game leduc_poker() params {'action_mapping': False, 'players': 2, 'starting_player': 0, 'suit_isomorphism': False}
+infosets 936 terminals 5520 max_utility 13.0
+value_after_1000_cfrplus [-0.08559349  0.08559349]
+exploitability_after_1000 0.0002571516161564563
+value_after_5000_cfrplus [-0.08560604  0.08560604]
+exploitability_after_5000 1.8385152071392907e-05
+exit=0
