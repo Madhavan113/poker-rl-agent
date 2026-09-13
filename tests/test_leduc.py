@@ -1,10 +1,10 @@
 import numpy as np
 import pytest
-from engine_helpers import walk
 
 from exsolver.games import CALL, FOLD, RAISE, GameSpec, LeducPoker
 from exsolver.solvers import CFRPlus, expected_value, exploitability
 from exsolver.strategy import enumerate_infosets, seat_of_key
+from tests.engine_helpers import walk
 
 Js, Jh, Qs, Qh, Ks, Kh = range(6)
 LEDUC_VALUE = -0.085603  # seat-0 game value; OpenSpiel 2.0.2 CFR+ on the default Leduc game

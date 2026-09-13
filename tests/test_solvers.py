@@ -1,6 +1,5 @@
 import numpy as np
 import pytest
-from engine_helpers import pure_strategy, random_strategy
 
 from exsolver.games import CALL, FOLD, RAISE, KuhnPoker, LeducPoker
 from exsolver.solvers import (
@@ -22,6 +21,7 @@ from exsolver.strategy import (
     strategy_to_array,
     uniform_strategy,
 )
+from tests.engine_helpers import pure_strategy, random_strategy
 
 KUHN_VALUE = -1.0 / 18.0
 

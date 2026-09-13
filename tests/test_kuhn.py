@@ -1,10 +1,10 @@
 import numpy as np
 import pytest
-from engine_helpers import walk
 
 from exsolver.games import CALL, FOLD, RAISE, GameSpec, KuhnPoker
 from exsolver.games.tree import compile_tree
 from exsolver.strategy import enumerate_infosets, seat_of_key, uniform_strategy
+from tests.engine_helpers import walk
 
 J, Q, K = 0, 1, 2
 LEGAL = {"": [CALL, RAISE], "c": [CALL, RAISE], "b": [FOLD, CALL], "cb": [FOLD, CALL]}
