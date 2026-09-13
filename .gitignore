@@ -1,7 +1,11 @@
 .venv/
 __pycache__/
 *.pyc
-runs/*/
+runs/**/*.npz
+runs/**/*.pt
+runs/**/*.jsonl
+runs/**/*.log
+runs/**/*.npy
 !runs/.gitkeep
 /data/
 *.npz
