@@ -1,0 +1,24 @@
+{
+  "game": "leduc",
+  "status": "verified",
+  "provenance": [
+    "OpenSpiel 2.0.2 (Lanctot et al. 2019), game leduc_poker with default parameters (players=2, starting_player=0, suit_isomorphism=False), independent run on 2026-09-13: 936 information states, 5520 terminal histories, max utility 13; CFR+ average-policy value for seat 0 -0.08559349 after 1000 iterations and -0.08560604 after 5000 iterations with exploitability 1.8385e-05 (NashConv/2).",
+    "Script truth/derivations/openspiel_leduc.py, output truth/derivations/openspiel_leduc.out; reproduction command in truth/README.md."
+  ],
+  "rules": {
+    "deck": "6 cards = 3 ranks (J, Q, K) x 2 suits (s, h); card index = rank*2 + suit (Js=0, Jh=1, Qs=2, Qh=3, Ks=4, Kh=5)",
+    "ante": 1,
+    "order": "seat 0 acts first in both rounds",
+    "bet_sizes": {"round1": 2, "round2": 4},
+    "raise_cap": "at most two raises per round, with the opening bet counting toward the cap",
+    "fold": "only when facing a bet",
+    "board": "one public card dealt before round 2",
+    "showdown": "a pair with the board beats a high card, otherwise the higher rank wins; equal ranks split the pot"
+  },
+  "n_infosets": 936,
+  "n_terminals": 5520,
+  "max_result": 13,
+  "game_value_seat0": -0.08560604,
+  "cfr_plus": {"iterations": 1000},
+  "tolerances": {"cfr_value": 5e-4, "cfr_exploitability": 1e-3}
+}

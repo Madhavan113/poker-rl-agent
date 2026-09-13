@@ -1,0 +1,50 @@
+{
+  "game": "kuhn",
+  "status": "verified",
+  "provenance": [
+    "H. W. Kuhn (1950), 'A simplified two-person poker', Contributions to the Theory of Games I: game value -1/18 for the first player and the one-parameter equilibrium family.",
+    "Hand-computed best-response values; derivations in truth/README.md."
+  ],
+  "param_order": ["0:J|", "0:Q|", "0:K|", "0:J|cb", "0:Q|cb", "0:K|cb", "1:J|c", "1:Q|c", "1:K|c", "1:J|b", "1:Q|b", "1:K|b"],
+  "n_infosets": 12,
+  "game_value_seat0": -0.05555555555555555,
+  "nash_family": {
+    "description": "alpha in [0, 1/3]. Seat 0: bet J=alpha, Q=0, K=3alpha; after check-bet call J=0, Q=alpha+1/3, K=1. Seat 1: after check bet J=1/3, Q=0, K=1; facing bet call J=0, Q=1/3, K=1.",
+    "thetas": [
+      {"alpha": 0.0,                 "theta": [0.0, 0.0, 0.0, 0.0, 0.3333333333333333, 1.0, 0.3333333333333333, 0.0, 1.0, 0.0, 0.3333333333333333, 1.0]},
+      {"alpha": 0.16666666666666666, "theta": [0.16666666666666666, 0.0, 0.5, 0.0, 0.5, 1.0, 0.3333333333333333, 0.0, 1.0, 0.0, 0.3333333333333333, 1.0]},
+      {"alpha": 0.3333333333333333,  "theta": [0.3333333333333333, 0.0, 1.0, 0.0, 0.6666666666666666, 1.0, 0.3333333333333333, 0.0, 1.0, 0.0, 0.3333333333333333, 1.0]}
+    ]
+  },
+  "hand_computed_best_responses": [
+    {
+      "name": "seat-1 station: always bets after a check, always calls a bet",
+      "opponent_theta": [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1],
+      "br_seat": 0,
+      "value": 0.3333333333333333,
+      "derivation": "Bet is always called: J -2, Q 0, K +2. Check is always bet into: call same, fold -1. BR: J check-fold, Q 0, K +2 -> 1/3."
+    },
+    {
+      "name": "seat-0 maniac: always bets",
+      "opponent_theta": [1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+      "br_seat": 1,
+      "value": 0.3333333333333333,
+      "derivation": "Facing a bet: J fold -1, Q call 0, K call +2 -> 1/3."
+    },
+    {
+      "name": "seat-1 folder: never bets after a check, folds every bet",
+      "opponent_theta": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "br_seat": 0,
+      "value": 1.0,
+      "derivation": "Bet every card; opponent folds; +1 always."
+    }
+  ],
+  "cfr_plus": {"iterations": 2000},
+  "tolerances": {
+    "hand_computed_value": 1e-9,
+    "nash_exploitability": 1e-9,
+    "nash_value": 1e-9,
+    "cfr_value": 1e-3,
+    "cfr_exploitability": 1e-3
+  }
+}

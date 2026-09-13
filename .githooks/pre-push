@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Pre-push hook. Enable with: git config core.hooksPath .githooks
+# git feeds the refs being pushed on stdin, one per line:
+#   <local ref> <local sha> <remote ref> <remote sha>
+# Run the preflight once if at least one branch ref is being pushed (not deleted); tag-only
+# pushes are skipped.
+set -euo pipefail
+zero=0000000000000000000000000000000000000000
+branch_push=0
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    refs/heads/*) [ "$local_sha" != "$zero" ] && branch_push=1 ;;
+  esac
+done
+if [ "$branch_push" -eq 1 ]; then
+  exec "$(git rev-parse --show-toplevel)/scripts/preflight.sh"
+fi
+echo "pre-push: no branch refs in this push; preflight skipped"

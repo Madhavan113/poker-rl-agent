@@ -1,0 +1,81 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+permissions:
+  contents: read
+env:
+  UV_LOCKED: "1"
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked --only-group dev
+      - run: uv run --no-sync ruff format --check src tests scripts
+      - run: uv run --no-sync ruff check src tests scripts
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run pytest -q -m "not ground_truth" --ignore=tests/ground_truth --durations=10
+  ground-truth:
+    name: ground-truth
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: PR body carries a PREFLIGHT OK line for this head commit and truth hash
+        if: github.event_name == 'pull_request'
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "::error::$1"
+            echo "The PR body must contain the PREFLIGHT OK line that scripts/preflight.sh printed for the"
+            echo "head commit $HEAD_SHA. Check out that commit with a clean tree, run scripts/preflight.sh"
+            echo "again, and replace the PREFLIGHT line in the PR body with the new one."
+            exit 1
+          }
+          line=$(gh pr view "$PR" --repo "$REPO" --json body -q .body | tr -d '\r' \
+                 | grep -E '^PREFLIGHT OK' | tail -n 1 || true)
+          [ -n "$line" ] || fail "no line starting with 'PREFLIGHT OK' in the PR body"
+          echo "PR body: $line"
+          commit=$(sed -nE 's/.*[[:space:]]commit=([0-9a-f]+).*/\1/p' <<<"$line")
+          truth=$(sed -nE 's/.*[[:space:]]truth=([0-9a-f]+).*/\1/p' <<<"$line")
+          expected_truth=$(uv run python scripts/check_truth.py --hash)
+          [[ "$commit" =~ ^[0-9a-f]{7,40}$ ]] || fail "PREFLIGHT line has no usable commit= value"
+          [[ "$HEAD_SHA" == "$commit"* ]] \
+            || fail "PREFLIGHT commit=$commit is not a prefix of the head commit $HEAD_SHA (preflight ran on another commit)"
+          [ "$truth" = "$expected_truth" ] \
+            || fail "PREFLIGHT truth=$truth differs from this commit's truth hash $expected_truth (truth/*.json changed after preflight ran)"
+          echo "PREFLIGHT line matches head commit $HEAD_SHA and truth hash $expected_truth."
+      - run: scripts/ground_truth.sh
