@@ -9,10 +9,13 @@
 
 ## Ground truth
 
-<!-- Paste the final PREFLIGHT block printed by scripts/preflight.sh. It must be from the HEAD commit. -->
+<!-- Paste the PREFLIGHT OK line printed by scripts/preflight.sh for the HEAD commit. The
+     ground-truth CI job fails unless its commit= is a prefix of the PR head and its truth= equals
+     scripts/check_truth.py --hash at that commit: re-run the preflight and replace this line after
+     every push. -->
 
 ```
-PREFLIGHT ...
+PREFLIGHT OK ...
 ```
 
 ## Tests
@@ -22,7 +25,9 @@ PREFLIGHT ...
 
 ## Review
 
-- [ ] Independent review completed per docs/CODE_REVIEW.md; findings linked below and resolved
+- [ ] Independent review completed per docs/CODE_REVIEW.md; findings linked below and resolved.
+      The author ticks this box only after the reviewer's `REVIEW-APPROVED <head sha>` comment
+      exists on this PR, never in advance.
 - [ ] No new runtime dependencies (or justified in Summary)
 - [ ] No data, checkpoints or `runs/` output committed
 - [ ] Seeds and configs recorded for any reported number

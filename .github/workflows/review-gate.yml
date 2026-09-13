@@ -2,30 +2,76 @@ name: review-gate
 on:
   pull_request:
     types: [opened, reopened, synchronize, labeled, unlabeled, ready_for_review]
+concurrency:
+  group: review-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
 permissions:
   contents: read
   pull-requests: write
+  issues: read
 jobs:
   review-gate:
     name: review-gate
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
-      - name: Drop stale approval when new commits arrive
+      - name: New commits invalidate the independent review
         if: github.event.action == 'synchronize'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          gh pr edit "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" \
-            --remove-label "review: approved" || true
-          echo "New commits: the independent review must be redone (docs/CODE_REVIEW.md)."
+          set -euo pipefail
+          if err=$(gh pr edit "$PR" --repo "$REPO" --remove-label "review: approved" 2>&1); then
+            echo "Removed stale label 'review: approved'."
+          elif grep -qiE "does not exist|not present|not found" <<<"$err"; then
+            echo "Label 'review: approved' was not on the PR; nothing to remove."
+          else
+            echo "::error::Could not remove label 'review: approved': $err"
+            exit 1
+          fi
+          echo "::error::New commits (head $HEAD_SHA): the independent review must be redone per docs/CODE_REVIEW.md. The reviewer re-approves by commenting a line 'REVIEW-APPROVED $HEAD_SHA' and re-adding the label 'review: approved'."
           exit 1
-      - name: Require the independent-review approval label
-        env:
-          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+      - name: Check the live PR state against the review policy
+        if: github.event.action != 'synchronize'
         run: |
-          case ",$LABELS," in
-            *",review: approved,"*) echo "Independent review approved."; exit 0 ;;
-          esac
-          echo "Missing label 'review: approved'. It is added only after the independent review"
-          echo "checklist in docs/CODE_REVIEW.md is complete and every blocking finding is resolved."
-          exit 1
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::head sha '$HEAD_SHA' is not a full 40-character sha"; exit 1; }
+          labels=$(gh api "repos/$REPO/issues/$PR/labels" --paginate -q '.[].name')
+          comments=$(gh api "repos/$REPO/issues/$PR/comments" --paginate -q '.[].body' | tr -d '\r')
+          changed=$(gh pr diff "$PR" --repo "$REPO" --name-only)
+          has_label() { grep -qxF -- "$1" <<<"$labels"; }
+          echo "head: $HEAD_SHA"
+          echo "labels:"; sed 's/^/  /' <<<"${labels:-<none>}"
+          ok=1
+          if has_label "review: approved"; then
+            echo "ok    (a) label 'review: approved' present"
+          else
+            echo "FAIL  (a) label 'review: approved' missing"; ok=0
+          fi
+          if has_label "review: changes requested"; then
+            echo "FAIL  (b) label 'review: changes requested' present"; ok=0
+          else
+            echo "ok    (b) label 'review: changes requested' absent"
+          fi
+          if grep -qxF -- "REVIEW-APPROVED $HEAD_SHA" <<<"$comments"; then
+            echo "ok    (c) a comment contains the line 'REVIEW-APPROVED $HEAD_SHA'"
+          else
+            echo "FAIL  (c) no comment contains a line exactly 'REVIEW-APPROVED $HEAD_SHA' (the approval must name the current head commit)"; ok=0
+          fi
+          if grep -qE '^(truth|tests/ground_truth)/' <<<"$changed"; then
+            if has_label "ground-truth"; then
+              echo "ok    (d) truth/ or tests/ground_truth/ changed and label 'ground-truth' present"
+            else
+              echo "FAIL  (d) truth/ or tests/ground_truth/ changed but label 'ground-truth' missing"; ok=0
+            fi
+          else
+            echo "ok    (d) no changes under truth/ or tests/ground_truth/"
+          fi
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::review-gate failed; see the FAIL lines above and docs/CODE_REVIEW.md step 5."
+            exit 1
+          fi
+          echo "Independent review approved for $HEAD_SHA."
