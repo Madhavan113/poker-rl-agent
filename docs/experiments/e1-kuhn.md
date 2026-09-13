@@ -152,7 +152,8 @@ class SessionContext:
 # exsolver/agents/base.py
 class Agent(Protocol):
     name: str
-    def reset(self, rng) -> None
+    def reset(self, rng) -> None                     # start of a session
+    def observe(self, hand: HandRecord) -> None      # called by the evaluator after every completed hand
     def strategy_for_hand(self, ctx: SessionContext, seat: int) -> TabularStrategy
         # full strategy over ALL of the agent's infosets at `seat` for the upcoming hand,
         # conditioned on ctx. Used both to sample the agent's actions and for exact EV/exploitability.
@@ -214,11 +215,15 @@ Decoder-only transformer, causal, learned positional embeddings. Defaults `d_mod
 
 Loss `= CE_action + λ_opp · CE_opp + λ_theta · BCE_theta`, defaults `λ_opp = 0.5`,
 `λ_theta = 0.5`. AdamW, lr 3e-4, weight decay 0.01, cosine decay, warm-up 500 steps, batch 64,
+(E1 runs use batch 32 × 12 000 steps, see the configuration table; further implementation details are
+declared in the `TrainConfig` docstring: gradient clipping 1.0, cosine floor at 10 % of lr, AdamW betas
+(0.9, 0.95), weight decay only on ≥2-D tensors, loss-exact `trim_padding`, deterministic held-out split.)
 20k steps. Device: `mps` if available else `cpu`. Checkpoint stores config, vocab meta and weights.
 
 Inference helper: `policy_at(prefixes) -> [B, 3]` batched action distributions at the end of each
 prefix, and `belief_at(prefixes) -> [B, M]`. The transformer agent implements
 `strategy_for_hand` by querying every agent infoset of the upcoming hand (card × history) as a
+(the unpadded session stream is appended as one more row so the belief read-out shares the forward pass)
 counterfactual prefix `ctx + HAND POS_s CARD_c [history...]` — 6 queries per hand in Kuhn.
 
 ## Baseline agents, `exsolver/agents/`
@@ -241,7 +246,10 @@ log-probabilities. `entropy()` in nats.
 
 ## Session runner and metrics, `exsolver/eval/`
 
-`run_session(game, agent, theta_profile, opp_id, population, H, rng)` plays `H` hands, alternating
+`run_session(game, agent, opp_profile, H, rng, *, posterior=None, equilibrium_value_seat0, ...)`
+(implemented signature; the evaluator owns the exact posterior object and updates it, the agent only
+receives `observe(hand)`; `rng` is split into deal / opponent / agent / reset streams so every agent
+faces identical deals for the same `(eval_seed, opp_id, session)`) plays `H` hands, alternating
 seats, sampling the agent's actions from `strategy_for_hand` and the opponent's from θ. Per hand
 index `t` it records:
 
@@ -266,16 +274,27 @@ versus `OracleBR`.
 | training sessions            | 100 000                                       |
 | eval                         | every opponent × 4 fresh sessions, seed 1     |
 | model                        | 4 × 128, 4 heads                              |
-| steps / batch                | 20 000 / 64                                   |
+| steps / batch                | 12 000 / 32 (spec target 20 000 / 64; see note)|
+
+Training-budget note: on the M4/MPS the attention backward is memory-bound, so throughput is roughly
+100–135 session-passes per second regardless of batch size; 20 000 × 64 would take ~3 h. The runner
+therefore defaults to 32 × 12 000 (~1 h) and records the deviation in `<out>/README.md` and
+`summary.md`; `--batch/--steps` override it.
 
 E1b (continuous prior): fresh θ per session from `KuhnPrior`; theta head instead of opponent head;
 eval on 512 fresh θ. No exact posterior over a discrete set; report EV curves, theta-head BCE
 and calibration versus hands seen.
 
 Runner: `uv run python -m exsolver.experiments.e1_kuhn {population,gen,train,eval,all} --out runs/e1
-[--smoke]` where `--smoke` shrinks everything to run in under two minutes on CPU.
+[--smoke] [--max-train-minutes M] [--retrain]` where `--smoke` shrinks everything to run in under two
+minutes on CPU and writes to `runs/e1_smoke` (it refuses `--out runs/e1` and the real dataset directory);
+every stage appends its command line and resolved config to `<out>/README.md`, and `eval` copies the
+checkpoint's training provenance into `summary.md`/`summary.json`.
 
 ## Success criteria
+
+Criteria are evaluated pointwise on the per-hand means for every `t` at or beyond the
+threshold (stricter than an average by `t`); EV comparisons are paired per `(opp, session)`.
 
 - H1: `kl[t]` for the transformer falls below 0.1 nats by `t = 32` on average, and
   `agent_entropy` tracks `post_entropy` within 0.2 nats.
@@ -288,3 +307,18 @@ Runner: `uv run python -m exsolver.experiments.e1_kuhn {population,gen,train,eva
 
 Leduc runs (engine only, Phase 1), RL fine-tuning, safety constraints, non-stationary opponents,
 IDS labels. Those are E2+ in `RESEARCH.md`.
+
+## Declared deviations (kept in sync with the merged code)
+
+| item | spec said | implemented | where declared |
+|------|-----------|-------------|----------------|
+| Leduc infoset key | `"1:Qs\|cb/Kh\|c"` | `"{seat}:{card}\|{round1}/{board}\|{round2}"`, e.g. `"1:Qs\|cbc/Kh\|c"` | #2 |
+| best response at zero-reach infosets | lowest-index tie rule | CALL when legal, else lowest legal (values unchanged) | #2, `solvers/best_response.py` |
+| `Game` protocol | — | gains `sample_chance(s, rng)` | #2 |
+| optimiser | AdamW, cosine | + grad clip 1.0, floor 10 %, betas (0.9, 0.95), decay on ≥2-D only | #3, `TrainConfig` docstring |
+| `Policy.policy_at` | — | `legal` required; raises on all-False rows | #3 |
+| training budget | 20 000 × 64 | 12 000 × 32 (MPS throughput) | runner README / summary |
+| `Agent` protocol | 4 methods | + `observe(hand)` | wave-2 PR, `agents/base.py` |
+| `run_session` | `(game, agent, theta_profile, opp_id, population, H, rng)` | see §Session runner | wave-2 PR, `eval/session.py` |
+| success criteria | "by t = 32 on average" | pointwise for all t ≥ threshold | wave-2 PR, `eval/aggregate.py` |
+| `--smoke` output | — | `runs/e1_smoke`, never `runs/e1` or `data/e1a` | wave-2 PR, `experiments/e1_kuhn.py` |
