@@ -5,6 +5,8 @@ CLI::
     uv run python -m exsolver.data.generate --population runs/e1/population.npz --out data/e1a \\
         --n 100000 --hands 64 --seed 0 --workers 8
     uv run python -m exsolver.data.generate --continuous --out data/e1b --n 100000 --hands 64
+    uv run python -m exsolver.data.generate --population runs/e1/population.npz \\
+        --out data/e1a_bayes --n 100000 --hands 64 --seed 0 --workers 8 --labels bayes_br
 
 Per session ``s`` (docs/experiments/e1-kuhn.md, "Data") the private generator
 ``session_rng(seed, s)`` draws, in this order: the opponent (``opp_id ~ weights`` from the
@@ -17,6 +19,16 @@ infoset (ties to the lowest index, as the solver resolves them) together with th
 the *taken* action only enters the token stream. Because every session owns its generator the
 output does not depend on the worker count: the sequential path and the multiprocessing path
 write byte-identical shards (``exsolver.data.shards`` format) plus ``meta.json``.
+
+Label variants (``labels``, recorded in ``meta.json``; ``labels_from_meta`` reads old files):
+
+* ``"oracle_br"`` (default): the E1 recipe above, ``BR(theta)(I)`` for the true opponent.
+* ``"bayes_br"`` (E2 condition E): ``BR(mix(p_t))(I)`` where ``p_t`` is the exact posterior over
+  the discrete population given the ``t`` completed hands of the session
+  (``exsolver.data.bayes_labels``). Everything else -- opponent draw, collection policy (the
+  ``oracle`` collector still plays ``BR(theta)``), seats, deals, tokens, legal masks -- is
+  identical, so an ``oracle_br`` and a ``bayes_br`` run with the same seed differ only in
+  ``action_target``. Not available under a continuous prior (no discrete posterior).
 """
 
 from __future__ import annotations
@@ -35,6 +47,7 @@ from typing import Any
 import numpy as np
 from tqdm import tqdm
 
+from exsolver.data.bayes_labels import BayesBRLabeller
 from exsolver.data.records import ACT, HandRecord
 from exsolver.data.shards import (
     META_FILENAME,
@@ -56,6 +69,8 @@ from exsolver.solvers.cfr import cfr_plus
 from exsolver.strategy import TabularStrategy, merge_seats, uniform_strategy
 
 COLLECTORS: tuple[str, ...] = ("equilibrium", "random", "oracle")
+LABEL_VARIANTS: tuple[str, ...] = ("oracle_br", "bayes_br")
+DEFAULT_LABELS = "oracle_br"
 DEFAULT_COLLECTION_MIX: dict[str, float] = {"equilibrium": 0.4, "random": 0.3, "oracle": 0.3}
 EQUILIBRIUM_ITERATIONS = 2000
 DEFAULT_POPULATION_PATH = Path("runs/e1/population.npz")
@@ -117,6 +132,19 @@ def normalise_mix(mix: Mapping[str, float] | None) -> dict[str, float]:
     return {name: float(p) for name, p in zip(COLLECTORS, probs, strict=True)}
 
 
+def check_labels(labels: str) -> str:
+    """Validate a label variant name (one of ``LABEL_VARIANTS``)."""
+    if labels not in LABEL_VARIANTS:
+        raise ValueError(f"unknown label variant {labels!r}; choose from {LABEL_VARIANTS}")
+    return labels
+
+
+def labels_from_meta(meta: Mapping[str, Any]) -> str:
+    """Label variant recorded in ``meta.json``; datasets written before the key existed are
+    ``"oracle_br"`` (the only variant there was)."""
+    return check_labels(str(meta.get("labels", DEFAULT_LABELS)))
+
+
 @dataclass(frozen=True)
 class GenConfig:
     """Everything a worker needs to reproduce any session of the run."""
@@ -129,10 +157,17 @@ class GenConfig:
     L: int
     seed: int
     collection_mix: dict[str, float]
+    labels: str = DEFAULT_LABELS
 
     def __post_init__(self) -> None:
         if (self.population is None) == (self.continuous_prior is None):
             raise ValueError("pass exactly one of population / continuous_prior")
+        check_labels(self.labels)
+        if self.labels == "bayes_br" and self.population is None:
+            raise ValueError(
+                "labels='bayes_br' needs a discrete population: the label is the best response "
+                "to the exact posterior mixture, which a continuous prior does not have"
+            )
         if self.population is not None and len(self.population) < 1:
             raise ValueError("population is empty")
         if self.hands_per_session < 1:
@@ -164,6 +199,11 @@ class SessionSampler:
         self.equilibrium = cfr_plus(cfg.game, EQUILIBRIUM_ITERATIONS)
         self.random = uniform_strategy(cfg.game)
         self._br_cache: dict[int, tuple[TabularStrategy, np.ndarray]] = {}
+        # bayes_br: exact posterior + posterior-mixture best response, from the population only
+        self.bayes: BayesBRLabeller | None = None
+        if cfg.labels == "bayes_br":
+            assert cfg.population is not None
+            self.bayes = BayesBRLabeller(cfg.game, cfg.population)
 
     def oracle_and_labels(
         self, opp_id: int, profile: TabularStrategy
@@ -204,10 +244,16 @@ class SessionSampler:
         collector = int(rng.choice(len(COLLECTORS), p=cfg.collector_probs))
         agent_strategy = (self.equilibrium, self.random, oracle)[collector]
 
+        bayes = self.bayes
+        if bayes is not None:
+            bayes.reset()
         hands: list[HandRecord] = []
         labels: list[int] = []
         legal: list[np.ndarray] = []
         for t in range(cfg.hands_per_session):
+            if bayes is not None:
+                # posterior over hands 0..t-1 only: the hand in progress is not yet observed
+                label_table = bayes.label_table(t % 2)
             hand, decisions = play_hand(cfg.game, t % 2, agent_strategy, profile, rng)
             n_agent_actions = sum(1 for ev in hand.events if ev[0] == ACT and ev[1] == 0)
             if n_agent_actions != len(decisions):
@@ -218,6 +264,8 @@ class SessionSampler:
                 labels.append(int(label_table[self.index[d.infoset_key]]))
                 legal.append(np.asarray(d.legal, dtype=bool))
             hands.append(hand)
+            if bayes is not None:
+                bayes.observe(hand)
 
         tokens = cfg.tokenizer.encode_session(hands, cfg.L)
         positions = cfg.tokenizer.decision_positions(tokens)
@@ -399,13 +447,15 @@ def generate_dataset(
     chunk_size: int = 250,
     overwrite: bool = False,
     progress: bool = True,
+    labels: str = DEFAULT_LABELS,
 ) -> dict[str, Any]:
     """Generate ``n_sessions`` labelled sessions into ``out_dir`` (shards + ``meta.json``).
 
     Exactly one of ``population`` / ``continuous_prior`` must be given. ``L`` defaults to
     ``default_L(game, hands_per_session)``. Work is split into chunks of ``chunk_size`` sessions
-    processed in index order, so the result is identical for every ``n_workers``. Returns the
-    meta dictionary that was written.
+    processed in index order, so the result is identical for every ``n_workers``. ``labels``
+    selects the label variant (module docstring); ``"bayes_br"`` requires ``population``.
+    Returns the meta dictionary that was written.
     """
     if n_sessions < 1:
         raise ValueError("n_sessions must be >= 1")
@@ -422,6 +472,7 @@ def generate_dataset(
         L=int(L) if L is not None else default_L(game, hands_per_session),
         seed=int(seed),
         collection_mix=normalise_mix(collection_mix),
+        labels=check_labels(labels),
     )
     out = Path(out_dir)
     _prepare_out_dir(out, overwrite)
@@ -450,6 +501,7 @@ def generate_dataset(
         population=_population_meta(cfg, population_path),
         collection_mix=cfg.collection_mix,
         seed=cfg.seed,
+        labels=cfg.labels,
         n_cards=game.spec.n_cards,
         max_result=game.spec.max_result,
         n_opp=len(population) if population is not None else 0,
@@ -519,6 +571,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--pop-seed", type=int, default=0, help="seed used when sampling a missing population"
     )
+    p.add_argument(
+        "--labels",
+        choices=LABEL_VARIANTS,
+        default=DEFAULT_LABELS,
+        help="label variant: oracle_br = BR(true theta); bayes_br = BR(exact posterior mixture)",
+    )
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--no-progress", action="store_true")
     return p
@@ -552,10 +610,12 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         chunk_size=args.chunk_size,
         overwrite=args.overwrite,
         progress=not args.no_progress,
+        labels=args.labels,
     )
     summary = {
         k: meta[k]
         for k in (
+            "labels",
             "n_sessions",
             "H",
             "L",
@@ -574,10 +634,14 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
 __all__: Iterable[str] = (
     "COLLECTORS",
     "DEFAULT_COLLECTION_MIX",
+    "DEFAULT_LABELS",
+    "LABEL_VARIANTS",
     "GenConfig",
     "SessionSampler",
+    "check_labels",
     "default_L",
     "generate_dataset",
+    "labels_from_meta",
     "max_hand_tokens",
     "normalise_mix",
     "population_fingerprint",
