@@ -36,8 +36,9 @@ population makes this exact and cheap: ~50 µs per hand) and label each decision
 
 ## Success criteria
 
-- E2-1: `kl_policy` for condition A is below 0.05 nats from t = 16 on, and Transformer(sample) is within
-  0.01 chips/hand of Thompson and Transformer(argmax) within 0.01 of PluralityBR for t ≥ 16 (paired).
+- E2-1: `kl_policy` below 0.05 nats from t = 16 on, and Transformer(sample) within 0.01 chips/hand of Thompson
+  and Transformer(argmax) within 0.01 of PluralityBR for t ≥ 16 (paired). Condition A is expected to fail this
+  (E1 measured 0.018 mean / 0.030 max vs Thompson); the question is whether B (longer training) passes.
 - E2-2: condition E is within 0.02 of BayesBR for t ≥ 16 (the H2 criterion E1 failed).
 - E2-3: condition B lowers the identity KL below condition A's at every t; conditions C/D change
   Transformer EV by less than 0.01 (the identity head is a diagnostic, not a driver) — or they do not, which is

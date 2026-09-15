@@ -4,7 +4,7 @@ Run of 2026-09-13 (`runs/e1/`; regenerate with the commands in `runs/e1/README.m
 exact (game-tree traversal), ± is one standard error over 1024 sessions per agent (256 opponents × 4
 sessions, 64 hands, identical deals across agents). Model: 4 × 128 transformer, 0.96M parameters, trained
 12 000 steps × batch 32 on 100 000 DPT sessions (68 min on the M4's MPS). Held-out action accuracy 0.881,
-opponent-id accuracy 0.132 (chance 0.004), opponent-id loss still falling at the end of training.
+opponent-id accuracy 0.132 (chance 0.004), opponent-id loss still falling, slowly, at the end of training.
 
 ## Headline numbers
 
@@ -25,7 +25,7 @@ opponent-id accuracy 0.132 (chance 0.004), opponent-id loss still falling at the
 | criterion | verdict | reading |
 |---|---|---|
 | H2 beats equilibrium for every t ≥ 4 (paired) | **PASS** | min advantage +0.033 at t = 4, mean +0.100 |
-| H2 within 0.02 of BayesBR for t ≥ 16 (paired) | FAIL | shortfall 0.028 mean, 0.041 max; within 0.02 of *Thompson* would pass for argmax |
+| H2 within 0.02 of BayesBR for t ≥ 16 (paired) | FAIL | shortfall 0.028 mean, 0.041 max; Transformer (argmax) is 0.014 under *Thompson* on average (0.028 max), so it would fail the same pointwise test against Thompson too |
 | H1 KL(exact ‖ opponent head) < 0.1 nats from t = 32 | FAIL | KL grows to 1.5 nats; read-out entropy plateaus at 3.9 nats while the exact posterior falls 5.55 → 2.3 |
 | H1 entropy tracking within 0.2 nats | FAIL | gap 0.93 mean, 1.59 at t = 63 |
 | sanity: oracle dominates every session-hand; equilibrium exploitability ≈ 0; ∓1/18 vs Nash | **PASS** | exact |
@@ -34,8 +34,9 @@ opponent-id accuracy 0.132 (chance 0.004), opponent-id loss still falling at the
 
 1. **In-context exploitation works and is worth a lot.** After 16 hands of context the transformer earns
    three times the equilibrium's edge (+0.17 vs +0.054 chips/hand) against opponents it has never
-   seen identified, and it never falls below equilibrium after hand 4. Against the "rock" archetype it
-   captures 0.15 of the 0.18 available, against maniacs 0.21 of 0.25.
+   seen identified, and it never falls below equilibrium after hand 4. Measured as excess over the equilibrium's EV, it captures
+   0.14 of the 0.18 available against the "rock" archetype and 0.12 of 0.16 against maniacs (Transformer
+   (sample); the per-archetype table in `runs/e1/summary.md` has all agents).
 2. **The action head is close to posterior sampling, not to the myopic Bayes-optimal policy.** Transformer
    (sample) sits just under Thompson and Transformer (argmax) just under Thompson's level too, while BayesBR
    is clearly better than both (+0.02–0.03 chips/hand). This is exactly the DPT label semantics (RESEARCH.md
@@ -52,8 +53,8 @@ opponent-id accuracy 0.132 (chance 0.004), opponent-id loss still falling at the
 4. **No information seeking, by design.** The probes (bluff rate with J, call-down rate with Q) are flat
    from hand ~5 for every agent. None of Thompson, BayesBR or the DPT labels price information (§2.3);
    H3 needs the IDS or RL variants.
-5. **Exploitation costs exploitability.** Every exploiter sits at 0.25–0.32 chips/hand exploitability,
-   the same as the oracle best response itself; the equilibrium sits at 0. This is the trade-off H5 will
+5. **Exploitation costs exploitability.** The exploiters sit at 0.25–0.32 chips/hand exploitability
+   (the oracle best response itself is at 0.31, Transformer (sample) lowest at 0.25); the equilibrium sits at 0. This is the trade-off H5 will
    put a knob on.
 6. Seat effect: EV per hand alternates with seat (seat 0 is worse in Kuhn), so all curves are read per
    pair of hands.
