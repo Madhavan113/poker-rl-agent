@@ -280,7 +280,15 @@ once sessions exceed a few thousand tokens; heads for action, value, and opponen
 - **Is exploitation worth it?** Against strong opponents the exploitable value is small and the
   exploitability cost real. The Pareto frontier in E5 is the honest answer.
 
-## 10. Decision log
+## 10. Results so far
+
+- **E1 (2026-09-13, `docs/experiments/e1-kuhn-results.md`)**: in-context exploitation works — after 16 hands the
+  transformer earns 3× the equilibrium edge and never drops below it; it sits at the Thompson (posterior
+  sampling) level, 0.02–0.03 chips/hand under the myopic Bayes-optimal agent, consistent with the DPT label
+  semantics of §2.5. Identity inference (H1 as written) is under-resolved and the wrong target; E2 replaces
+  it with a decision-relevant KL. No information seeking, as expected for these agents (§2.3).
+
+## 11. Decision log
 
 - 2026-09-13 — Start in Kuhn, not Leduc or HUNL: every quantity exact, so the first plots are
   about the method, not about estimator noise.
@@ -290,3 +298,5 @@ once sessions exceed a few thousand tokens; heads for action, value, and opponen
   as E1b.
 - 2026-09-13 — Train from scratch; no language-model base.
 - 2026-09-13 — No Docker, no services: single-machine research code (see `README.md`).
+- 2026-09-15 — H1 retired in favour of the policy-level KL (E2); the identity head stays as a diagnostic.
+  BayesBR labels (condition E2-E) become the primary route to closing the gap to the myopic Bayes-optimal agent.
