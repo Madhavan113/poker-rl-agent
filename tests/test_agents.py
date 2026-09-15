@@ -453,3 +453,193 @@ def test_transformer_single_pass_belief_matches_two_pass_and_is_cached(game, pop
         agent.belief(SessionContext(copy.deepcopy(ctx_a.hands))), truth_a, atol=1e-6
     )
     assert calls["belief_at"] == n_before
+
+
+# ---------------------------------------------------------------------- E2: plurality BR
+def _profile(seat0: dict[str, list[float]], seat1: dict[str, list[float]]) -> dict:
+    return {k: np.array(v, dtype=np.float64) for k, v in {**seat0, **seat1}.items()}
+
+
+# Two hand-built Kuhn opponents whose exact best responses differ at exactly ONE infoset.
+# Both check and call at seat 0. Opponent A never bets at seat 1 and always calls; opponent B
+# also always calls but, after a check, bets with K and bluffs with J (checks with Q).
+# Seat-0 best responses (derived by hand): J -> check, Q -> check (bet and check both worth 0,
+# tie -> CALL), K -> bet against both; facing a bet: 0:Q|cb -> CALL against both (A: unreachable
+# so the passive CALL; B: opp bets K or J, calling is worth 0 > -1), 0:K|cb -> CALL against both;
+# 0:J|cb -> CALL against A (unreachable, passive) but FOLD against B (opp only bets K when we
+# hold J: fold -1 > call -2). Seat-1 best responses coincide since the seat-0 entries coincide.
+_SEAT0_PASSIVE = {
+    "0:J|": [0, 1, 0],
+    "0:Q|": [0, 1, 0],
+    "0:K|": [0, 1, 0],
+    "0:J|cb": [0, 1, 0],
+    "0:Q|cb": [0, 1, 0],
+    "0:K|cb": [0, 1, 0],
+}
+OPP_A = _profile(
+    _SEAT0_PASSIVE,
+    {
+        "1:J|c": [0, 1, 0],
+        "1:Q|c": [0, 1, 0],
+        "1:K|c": [0, 1, 0],
+        "1:J|b": [0, 1, 0],
+        "1:Q|b": [0, 1, 0],
+        "1:K|b": [0, 1, 0],
+    },
+)
+OPP_B = _profile(
+    _SEAT0_PASSIVE,
+    {
+        "1:J|c": [0, 0, 1],
+        "1:Q|c": [0, 1, 0],
+        "1:K|c": [0, 0, 1],
+        "1:J|b": [0, 1, 0],
+        "1:Q|b": [0, 1, 0],
+        "1:K|b": [0, 1, 0],
+    },
+)
+
+
+def test_br_action_posterior_on_hand_built_populations():
+    from exsolver.agents import br_action_posterior
+
+    # two members, three infosets: member 0 plays (CALL, RAISE, FOLD), member 1 (RAISE, RAISE, CALL)
+    br = np.array(
+        [
+            [[0, 1, 0], [0, 0, 1], [1, 0, 0]],
+            [[0, 0, 1], [0, 0, 1], [0, 1, 0]],
+        ],
+        dtype=np.float64,
+    )
+    np.testing.assert_allclose(
+        br_action_posterior(br, [0.25, 0.75]),
+        [[0, 0.25, 0.75], [0, 0, 1], [0.25, 0.75, 0]],
+    )
+    np.testing.assert_array_equal(br_action_posterior(br, [1.0, 0.0]), br[0])
+    np.testing.assert_array_equal(br_action_posterior(br, [0.0, 1.0]), br[1])
+    out = br_action_posterior(br, [0.5, 0.5])
+    np.testing.assert_allclose(out.sum(axis=1), 1.0)
+    np.testing.assert_allclose(out[0], [0, 0.5, 0.5])
+    with pytest.raises(ValueError, match="one-hot"):
+        br_action_posterior(np.array([[[0.5, 0.5, 0]]]), [1.0])
+    with pytest.raises(ValueError, match="one-hot"):
+        br_action_posterior(np.array([[[1, 1, 0]]]), [1.0])
+    with pytest.raises(ValueError, match="members"):
+        br_action_posterior(br, [1.0])
+    with pytest.raises(ValueError, match="probability"):
+        br_action_posterior(br, [0.5, 0.6])
+    with pytest.raises(ValueError, match="probability"):
+        br_action_posterior(br, [-0.5, 1.5])
+    with pytest.raises(ValueError, match="shape"):
+        br_action_posterior(br[:, :, :2], [0.5, 0.5])
+
+
+def test_hand_built_opponents_best_responses_differ_at_exactly_one_infoset(game):
+    from exsolver.agents import BestResponseTable
+
+    table = BestResponseTable(game, [OPP_A, OPP_B])
+    assert not table.ready.any()
+    table.ensure([0, 1])
+    assert table.ready.all()
+    keys = table.tree.infoset_keys
+    differ = [
+        keys[i]
+        for i in range(len(keys))
+        if not np.array_equal(table.dense[0, i], table.dense[1, i])
+    ]
+    assert differ == ["0:J|cb"]
+    np.testing.assert_array_equal(table.dense[0, keys.index("0:J|cb")], [0, 1, 0])  # CALL vs A
+    np.testing.assert_array_equal(table.dense[1, keys.index("0:J|cb")], [1, 0, 0])  # FOLD vs B
+    # the hand derivation of the seat-0 best response against A
+    for key, want in (("0:J|", [0, 1, 0]), ("0:Q|", [0, 1, 0]), ("0:K|", [0, 0, 1])):
+        np.testing.assert_array_equal(table.dense[0, keys.index(key)], want, err_msg=key)
+    # the table agrees with the solver at both seats
+    for j, opp in enumerate((OPP_A, OPP_B)):
+        want = {**best_response(game, opp, 0)[0], **best_response(game, opp, 1)[0]}
+        got = table.best_response_to(j)
+        assert got.keys() == want.keys() and all(np.array_equal(got[k], want[k]) for k in got)
+
+
+def test_plurality_br_with_a_point_mass_equals_the_oracle(game, pop):
+    from exsolver.agents import PluralityBRAgent
+
+    ctx = SessionContext()
+    for j in (0, 3, 8, 11):
+        oracle = OracleBRAgent(game, pop.profiles[j])
+        plural = PluralityBRAgent(game, pop, prior_weights=np.eye(M)[j])
+        assert plural.name == "plurality_br"
+        for seat in (0, 1):
+            want = oracle.strategy_for_hand(ctx, seat)
+            got = plural.strategy_for_hand(ctx, seat)
+            validate_strategy(game, got, (seat,))
+            assert got.keys() == want.keys()
+            for key in want:
+                np.testing.assert_array_equal(got[key], want[key], err_msg=f"{j} {key}")
+            # pi* is the same point mass
+            pi = plural.br_action_posterior_for_seat(seat)
+            assert pi.keys() == want.keys() and all(np.array_equal(pi[k], want[k]) for k in pi)
+        np.testing.assert_array_equal(plural.belief(ctx), np.eye(M)[j])
+    # only the members with posterior mass get their best response computed
+    assert plural.br_table.ready.sum() == 1 and plural.br_table.ready[11]
+
+
+def test_plurality_br_ties_go_to_the_lowest_index_and_pi_star_is_half_half(game):
+    from exsolver.agents import PluralityBRAgent, br_action_posterior
+
+    plural = PluralityBRAgent(game, [OPP_A, OPP_B], prior_weights=np.array([0.5, 0.5]))
+    ctx = SessionContext()
+    st = plural.strategy_for_hand(ctx, 0)
+    validate_strategy(game, st, (0,))
+    np.testing.assert_array_equal(st["0:J|cb"], [1, 0, 0])  # FOLD (index 0) wins the tie
+    pi = plural.br_action_posterior_for_seat(0)
+    np.testing.assert_allclose(pi["0:J|cb"], [0.5, 0.5, 0.0])
+    assert plural.last_action_posterior is not None
+    np.testing.assert_allclose(plural.last_action_posterior["0:J|cb"], [0.5, 0.5, 0.0])
+    br_a = best_response(game, OPP_A, 0)[0]
+    for key in st:
+        if key != "0:J|cb":
+            np.testing.assert_array_equal(st[key], br_a[key], err_msg=key)  # agree elsewhere
+            np.testing.assert_array_equal(pi[key], br_a[key], err_msg=key)  # pi* one-hot there
+    # pi* by hand from the dense table
+    table = plural.br_table
+    manual = br_action_posterior(table.dense, [0.5, 0.5])
+    rows = table.tree.infoset_rows[0]
+    for j, i in enumerate(rows):
+        np.testing.assert_allclose(pi[table.tree.infoset_keys[i]], manual[i]), j
+    # seat 1: the best responses coincide, so plurality == either oracle
+    st1 = plural.strategy_for_hand(ctx, 1)
+    br1 = best_response(game, OPP_A, 1)[0]
+    assert st1.keys() == br1.keys() and all(np.array_equal(st1[k], br1[k]) for k in st1)
+    # posterior agents expose the same pi* (evaluator-side reference computes it identically)
+    thompson = ThompsonAgent(game, [OPP_A, OPP_B], rng=np.random.default_rng(0))
+    bayes = BayesBRAgent(game, [OPP_A, OPP_B])
+    for agent in (thompson, bayes):
+        p = agent.br_action_posterior_for_seat(0)
+        assert p.keys() == pi.keys() and all(np.allclose(p[k], pi[k]) for k in p)
+    # an unequal posterior breaks the tie the other way and the plurality follows it
+    skew = PluralityBRAgent(game, [OPP_A, OPP_B], prior_weights=np.array([0.6, 0.4]))
+    np.testing.assert_array_equal(skew.strategy_for_hand(ctx, 0)["0:J|cb"], [0, 1, 0])
+    # the agent has no channel for theta or the opponent id
+    assert set(inspect.signature(PluralityBRAgent).parameters) == {
+        "game",
+        "population",
+        "prior_weights",
+        "name",
+    }
+
+
+def test_plurality_br_tracks_the_posterior_during_a_session(game, pop):
+    from exsolver.agents import PluralityBRAgent
+
+    theta = pop.profiles[5]
+    plural = PluralityBRAgent(game, pop, name="PluralityBR")
+    ctx = play_session(game, plural, theta, 24, seed=11)
+    exact = ExactPosterior(game, pop)
+    exact.update_many(ctx.hands)
+    np.testing.assert_allclose(plural.belief(ctx), exact.probs, atol=1e-12)
+    st = plural.strategy_for_hand(ctx, 0)
+    pi = plural.br_action_posterior_for_seat(0)
+    for key, row in st.items():
+        assert row.sum() == 1.0 and row.max() == 1.0  # pure
+        assert row[int(np.argmax(pi[key]))] == 1.0  # the plurality action of pi*
+    assert plural.br_table.ready.sum() == int(np.sum(exact.probs > 0))

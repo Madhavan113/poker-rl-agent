@@ -3,9 +3,16 @@
 Every figure is regenerable from ``summary.json`` alone, so re-plotting never needs a re-run.
 Conventions (see the dataviz method): one y-axis per panel, thin 2px lines, ±1 s.e. bands as a
 10% wash of the series hue, hairline solid grid, text in ink tokens (never the series colour),
-a legend whenever two or more series are drawn. The learning agents take the four leading
-categorical slots in a fixed order; the oracle, the equilibrium and the random agent are
-reference / context series in ink grays so the comparison of interest stays in colour.
+a legend whenever two or more series are drawn. The learning agents take the five leading
+categorical slots in a fixed order (Transformer(sample), Transformer(argmax), BayesBR, Thompson,
+PluralityBR); the oracle, the equilibrium and the random agent are reference / context series in
+ink grays so the comparison of interest stays in colour.
+
+E2: transformer agents tagged with a condition (``Transformer(sample)[B]``, see
+``aggregate.tag_condition``) are coloured **by condition** from the slots the exact references
+do not use, solid for ``sample`` and dashed for ``argmax``; ``kl_policy_vs_hand.png`` shows the
+policy-level KL (log scale, 0.05-nat threshold) and ``conditions_ev.png`` compares the
+conditions' transformer curves with the exact references.
 """
 
 from __future__ import annotations
@@ -26,7 +33,12 @@ import numpy as np  # noqa: E402
 from matplotlib.axes import Axes  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 
-from exsolver.eval.session import BELIEF_FLOOR, BELIEF_FLOOR_CAP_NATS  # noqa: E402
+from exsolver.eval.aggregate import E2Thresholds, split_condition  # noqa: E402
+from exsolver.eval.session import (  # noqa: E402
+    BELIEF_FLOOR,
+    BELIEF_FLOOR_CAP_NATS,
+    PURE_STRATEGY_REASON,
+)
 
 # ---------------------------------------------------------------------- palette (reference instance)
 SURFACE = "#fcfcfb"
@@ -48,6 +60,8 @@ CATEGORICAL = (
 BAND_ALPHA = 0.12
 LINE_W = 1.6  # ~2px at the default 100 dpi
 FIG_DPI = 150
+KL_PLOT_FLOOR = 1e-3  # log-scale plots clip the mean KL here (a zero cannot be drawn)
+REFERENCE_SLOTS = (2, 3, 4)  # BayesBR, Thompson, PluralityBR keep these whatever else is drawn
 
 
 @dataclass(frozen=True)
@@ -72,13 +86,31 @@ def _tokens(name: str) -> set[str]:
     return set(out)
 
 
+def condition_styles(conditions: Sequence[str]) -> dict[str, str]:
+    """Colour per condition id (order of appearance) from the slots the references do not use.
+
+    Conditions beyond the free slots cycle; the E2 figures then rely on the legend labels.
+    """
+    free = [i for i in range(len(CATEGORICAL)) if i not in REFERENCE_SLOTS]
+    return {c: CATEGORICAL[free[k % len(free)]] for k, c in enumerate(dict.fromkeys(conditions))}
+
+
 def agent_styles(agents: Sequence[str]) -> dict[str, Style]:
-    """Fixed colour per entity: known agents always get the same slot, whatever else is present."""
+    """Fixed colour per entity: known agents always get the same slot, whatever else is present.
+
+    Condition-tagged transformer names (``Transformer(argmax)[C]``) are coloured by condition
+    (``condition_styles``): solid for ``sample``, dashed for ``argmax``.
+    """
     styles: dict[str, Style] = {}
     used: set[int] = set()
     unknown: list[str] = []
-    for name in agents:
-        toks = _tokens(name)
+    tagged = [split_condition(n) for n in agents]
+    cond_colour = condition_styles([c for _, c in tagged if c is not None])
+    for name, (base, cond) in zip(agents, tagged, strict=True):
+        toks = _tokens(base)
+        if cond is not None and "transformer" in toks:
+            styles[name] = Style(cond_colour[cond], "--" if "argmax" in toks else "-")
+            continue
         if "transformer" in toks and "argmax" in toks:
             slot = 1
         elif "transformer" in toks:
@@ -87,6 +119,8 @@ def agent_styles(agents: Sequence[str]) -> dict[str, Style]:
             slot = 2
         elif "thompson" in toks:
             slot = 3
+        elif "plurality" in toks or "pluralitybr" in toks:
+            slot = 4
         elif "oracle" in toks or "oraclebr" in toks:
             styles[name] = Style(INK, "--", LINE_W, band=False, zorder=2)
             continue
@@ -224,12 +258,16 @@ def _finish(fig: Figure, axes: Iterable[Axes], suptitle: str, path: Path) -> Pat
     return path
 
 
+def _experiment(agg: dict[str, Any]) -> str:
+    return str(agg.get("experiment") or "E1 Kuhn")
+
+
 def _header(agg: dict[str, Any], what: str) -> str:
     """Two-line figure title: what is plotted, then sessions / opponents / hands."""
     per_agent = agg.get("n_sessions_per_agent", {})
     n = max(per_agent.values()) if per_agent else agg.get("n_sessions", 0)
     return (
-        f"E1 Kuhn \u2014 {what}\n{n} sessions per agent "
+        f"{_experiment(agg)} \u2014 {what}\n{n} sessions per agent "
         f"({agg['n_opponents']} opponents \u00d7 {agg.get('n_sessions_per_opponent', '?')} sessions), "
         f"H = {agg['H']}"
     )
@@ -283,7 +321,7 @@ def plot_entropy_vs_hand(
             )
         kl = block["metrics"]["kl"]
         if not _all_nan(kl["mean"]):
-            m = np.maximum(_arr(kl["mean"]), 1e-3)
+            m = np.maximum(_arr(kl["mean"]), KL_PLOT_FLOOR)
             drew_any_kl |= _plot_curve(ax_k, x, m, kl["se"], styles[name], name)
     m_prior = n_opponents_prior or agg.get("n_population")
     if m_prior:
@@ -383,19 +421,119 @@ def plot_probes(agg: dict[str, Any], path: str | Path) -> Path:
     )
 
 
+def plot_kl_policy_vs_hand(agg: dict[str, Any], path: str | Path) -> Path:
+    """Policy-level KL(pi*_t || sigma_t): reach-weighted (left) and plain mean over infosets (right).
+
+    Log scale (means clipped at ``KL_PLOT_FLOOR``), the E2-1 threshold as a reference line, ±1
+    s.e. bands, session counts in the title. Agents without any value (pure strategies) are
+    listed in the panel title instead of being drawn.
+    """
+    styles = agent_styles(agg["agents"])
+    fig, (ax_w, ax_u) = _figure(2)
+    x = _x(agg)
+    threshold = (agg.get("criteria_e2") or {}).get("thresholds", {}).get("kl_policy")
+    threshold = E2Thresholds().kl_policy if threshold is None else float(threshold)
+    omitted: list[str] = []
+    drew = False
+    for name in agg["agents"]:
+        block = agg["per_agent"][name]["metrics"]
+        cw, cu = block.get("kl_policy"), block.get("kl_policy_unweighted")
+        if cw is None or _all_nan(cw["mean"]):
+            omitted.append(name)
+            continue
+        drew |= _plot_curve(
+            ax_w, x, np.maximum(_arr(cw["mean"]), KL_PLOT_FLOOR), cw["se"], styles[name], name
+        )
+        _plot_curve(
+            ax_u, x, np.maximum(_arr(cu["mean"]), KL_PLOT_FLOOR), cu["se"], styles[name], name
+        )
+    header = _header(agg, "decision-relevant inference (policy KL)")
+    if omitted:
+        header += f"\nnot defined for pure strategies (omitted): {', '.join(omitted)}"
+    if drew:
+        for ax in (ax_w, ax_u):
+            ax.set_yscale("log")
+            _hline(ax, threshold, f"E2-1 threshold {threshold:g} nats")
+        _setup_axes(
+            ax_w,
+            "Reach-weighted KL(π* ‖ σ) before hand t",
+            "hand index t",
+            f"nats (log scale, floor {KL_PLOT_FLOOR:g})",
+        )
+        _setup_axes(
+            ax_u,
+            "Unweighted mean KL(π* ‖ σ) over the seat's infosets",
+            "hand index t",
+            f"nats (log scale, floor {KL_PLOT_FLOOR:g})",
+        )
+    else:
+        _setup_axes(ax_w, "policy KL: no mixed-strategy agent recorded it", "hand index t", "nats")
+        _setup_axes(ax_u, "policy KL (unweighted): nothing recorded", "hand index t", "nats")
+    return _finish(fig, (ax_w, ax_u), header, path)
+
+
+def plot_conditions_ev(agg: dict[str, Any], path: str | Path) -> Path:
+    """EV per pair of hands: every condition's Transformer(sample) with Thompson / BayesBR (left)
+    and Transformer(argmax) with PluralityBR / BayesBR (right); Equilibrium and OracleBR as context."""
+    styles = agent_styles(agg["agents"])
+    fig, (ax_s, ax_a) = _figure(2)
+    px = np.asarray(agg["pair_x"], dtype=np.float64)
+    context = {"oracle", "oraclebr", "equilibrium", "cfr", "nash"}
+    refs = {
+        "sample": {"thompson", "bayes", "bayesbr"},
+        "argmax": {"plurality", "pluralitybr", "bayes", "bayesbr"},
+    }
+    n_drawn = {"sample": 0, "argmax": 0}
+    for name in agg["agents"]:
+        base, cond = split_condition(name)
+        toks = _tokens(base)
+        p = agg["per_agent"][name]["pairs"]["ev"]
+        for mode, ax in (("sample", ax_s), ("argmax", ax_a)):
+            is_transformer = "transformer" in toks and (mode in toks)
+            if is_transformer or toks & refs[mode] or toks & context:
+                label = name if cond is None else f"{base} — condition {cond}"
+                n_drawn[mode] += _plot_curve(ax, px, p["mean"], p["se"], styles[name], label)
+    conds = agg.get("conditions") or {}
+    pending = [c for c, st in conds.items() if st != "evaluated"]
+    tail = f" (pending: {', '.join(pending)})" if pending else ""
+    _setup_axes(
+        ax_s,
+        "Transformer(sample) per condition vs Thompson / BayesBR" + tail,
+        "hand index t",
+        "chips / pair of hands",
+    )
+    _setup_axes(
+        ax_a,
+        "Transformer(argmax) per condition vs PluralityBR / BayesBR" + tail,
+        "hand index t",
+        "chips / pair of hands",
+    )
+    for ax in (ax_s, ax_a):
+        _hline(ax, 0.0, "break-even")
+    return _finish(
+        fig, (ax_s, ax_a), _header(agg, "conditions: expected value vs the exact references"), path
+    )
+
+
 FIGURES = {
     "ev_vs_hand.png": plot_ev_vs_hand,
     "entropy_vs_hand.png": plot_entropy_vs_hand,
     "exploitability_vs_hand.png": plot_exploitability_vs_hand,
     "regret_cumulative.png": plot_regret_cumulative,
     "probes.png": plot_probes,
+    "kl_policy_vs_hand.png": plot_kl_policy_vs_hand,
 }
+CONDITION_FIGURES = {"conditions_ev.png": plot_conditions_ev}
 
 
 def write_all_plots(agg: dict[str, Any], out_dir: str | Path) -> list[Path]:
-    """Write every figure of ``FIGURES`` into ``out_dir``."""
+    """Write every figure of ``FIGURES`` into ``out_dir`` (plus ``CONDITION_FIGURES`` when the
+    aggregate lists several conditions under ``"conditions"``)."""
     out_dir = Path(out_dir)
-    return [fn(agg, out_dir / name) for name, fn in FIGURES.items()]
+    paths = [fn(agg, out_dir / name) for name, fn in FIGURES.items()]
+    if len(agg.get("conditions") or {}) > 1:
+        paths += [fn(agg, out_dir / name) for name, fn in CONDITION_FIGURES.items()]
+    return paths
 
 
 # ---------------------------------------------------------------------- markdown summary
@@ -440,6 +578,7 @@ def summary_table(agg: dict[str, Any]) -> str:
         f"cum. regret vs {agg.get('reference') or 'ref'} (t=H)",
         "mean exploitability",
         "final KL (nats)",
+        "mean policy KL (nats)",
     ]
     rows = []
     for name in agg["agents"]:
@@ -454,19 +593,21 @@ def summary_table(agg: dict[str, Any]) -> str:
                 _fmt(s["regret_final"], 3),
                 _fmt(s["expl_mean"]),
                 _fmt(s["kl_final"], 3),
+                _fmt(s.get("kl_policy_all"), 3),
             ]
         )
-    return _md_table(header, rows)
+    return md_table(header, rows)
 
 
-def _md_table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+def md_table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
     lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
     lines += ["| " + " | ".join(r) + " |" for r in rows]
     return "\n".join(lines)
 
 
-def criteria_table(agg: dict[str, Any]) -> str:
-    crit = agg["criteria"]
+def criteria_table(agg: dict[str, Any], key: str = "criteria") -> str:
+    """Verdict table of ``agg[key]`` (``"criteria"`` for E1, ``"criteria_e2"`` for E2)."""
+    crit = agg.get(key) or {}
     rows = []
     descriptions = {
         "H1_kl": "KL(exact ‖ transformer belief) < {threshold} nats from hand {t} on",
@@ -477,13 +618,17 @@ def criteria_table(agg: dict[str, Any]) -> str:
         "sanity_equilibrium_exploitability": "Equilibrium agent exploitability < {threshold} at every hand",
         "sanity_equilibrium_vs_nash": "Equilibrium agent EV vs an exact Nash opponent is ∓1/18 by seat",
     }
-    for key, entry in crit.items():
-        if key in ("resolved_agents", "thresholds") or not isinstance(entry, dict):
+    for name, entry in crit.items():
+        if name in ("resolved_agents", "thresholds", "roles", "conditions") or not isinstance(
+            entry, dict
+        ):
             continue
-        desc = descriptions.get(key, key)
+        if "pass" not in entry:
+            continue
+        desc = entry.get("description") or descriptions.get(name, name)
         try:
             desc = desc.format(**entry)
-        except (KeyError, IndexError):
+        except (KeyError, IndexError, ValueError):
             pass
         numbers = {
             k: v
@@ -499,13 +644,14 @@ def criteria_table(agg: dict[str, Any]) -> str:
                 "t_from",
                 "note",
                 "violation_by_agent",
+                "description",
             )
         }
         num_txt = ", ".join(f"{k}={_num(v)}" for k, v in numbers.items())
         if entry.get("note"):
             num_txt = (num_txt + "; " if num_txt else "") + str(entry["note"])
-        rows.append([key, desc, _verdict(entry), num_txt])
-    return _md_table(["check", "criterion", "verdict", "numbers"], rows)
+        rows.append([name, desc, _verdict(entry), num_txt])
+    return md_table(["check", "criterion", "verdict", "numbers"], rows)
 
 
 def archetype_table(agg: dict[str, Any]) -> str:
@@ -520,7 +666,7 @@ def archetype_table(agg: dict[str, Any]) -> str:
         rows.append(
             [name] + [_fmt(by[a]["summary"]["ev_all"]) if a in by else "–" for a in arch_names]
         )
-    return _md_table(header, rows)
+    return md_table(header, rows)
 
 
 def training_table(agg: dict[str, Any]) -> str:
@@ -534,7 +680,7 @@ def training_table(agg: dict[str, Any]) -> str:
             continue
         text = json.dumps(value, default=str) if isinstance(value, dict | list) else _num(value, 6)
         rows.append([key, text])
-    return _md_table(["field", "value (from the checkpoint)"], rows)
+    return md_table(["field", "value (from the checkpoint)"], rows)
 
 
 def notes(agg: dict[str, Any]) -> list[str]:
@@ -549,6 +695,11 @@ def notes(agg: dict[str, Any]) -> list[str]:
         'spec\'s "by t = 32 on average"); hand thresholds are clipped to H − 1 for short runs '
         "(`scaled_to_H=True`).",
         "Regret pairs sessions by (opponent, session index): every agent faced the same deals.",
+        "Policy KL = Σ_I w_t(I)·KL(π*_t(·|I) ‖ σ_t(·|I)) over the agent's infosets of the upcoming hand, "
+        "π*_t the exact posterior over best-response actions, w_t the reach of each infoset under π*_t "
+        "against the posterior-mixture opponent (sum 1; unreachable infosets weigh 0); same 1e-30 floor. "
+        + PURE_STRATEGY_REASON
+        + ".",
     ]
     tr = agg.get("training") or {}
     batch, steps = tr.get("batch_size"), tr.get("steps")
@@ -567,7 +718,7 @@ def render_summary_md(agg: dict[str, Any], *, extra: dict[str, Any] | None = Non
     n_per = agg.get("n_sessions_per_agent", {})
     n = max(n_per.values()) if n_per else agg.get("n_sessions", 0)
     parts = [
-        "# E1 Kuhn — summary",
+        f"# {_experiment(agg)} — summary",
         "",
         f"{n} sessions per agent = {agg['n_opponents']} opponents × "
         f"{agg.get('n_sessions_per_opponent', '?')} sessions, H = {agg['H']} hands per session, "
@@ -586,6 +737,15 @@ def render_summary_md(agg: dict[str, Any], *, extra: dict[str, Any] | None = Non
         f"Resolved agent names: {agg['criteria'].get('resolved_agents')}. Hand thresholds are clipped to H − 1 "
         "when H is shorter than the spec's 64 hands (`scaled_to_H=True`).",
         "",
+    ]
+    if agg.get("criteria_e2"):
+        parts += [
+            "## E2 criteria (docs/experiments/e2-decision-relevant-inference.md)",
+            "",
+            criteria_table(agg, "criteria_e2"),
+            "",
+        ]
+    parts += [
         "## EV over all hands by opponent archetype",
         "",
         archetype_table(agg),
@@ -594,11 +754,13 @@ def render_summary_md(agg: dict[str, Any], *, extra: dict[str, Any] | None = Non
     if agg.get("training"):
         parts += ["## Training configuration (from the checkpoint)", "", training_table(agg), ""]
     parts += ["## Notes", ""] + [f"- {n}" for n in notes(agg)] + [""]
+    figures = list(FIGURES)
+    if len(agg.get("conditions") or {}) > 1:
+        figures += list(CONDITION_FIGURES)
     parts += [
         "## Figures",
         "",
-        "`ev_vs_hand.png`, `entropy_vs_hand.png`, `exploitability_vs_hand.png`, `regret_cumulative.png`, `probes.png` "
-        "(all regenerable from `summary.json`).",
+        ", ".join(f"`{f}`" for f in figures) + " (all regenerable from `summary.json`).",
         "",
     ]
     if extra:

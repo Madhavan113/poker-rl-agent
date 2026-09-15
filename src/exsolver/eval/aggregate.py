@@ -14,6 +14,13 @@ on), which is stricter than the spec's "by t = 32 on average"; hand thresholds a
 ``H - 1`` for short runs and flagged ``scaled_to_H``. Paired quantities (regret, H2 gaps) require
 every agent to have run exactly the same ``(opp_id, session)`` set; a mismatch raises instead of
 silently dropping sessions.
+
+E2 (docs/experiments/e2-decision-relevant-inference.md): ``kl_policy`` / ``kl_policy_unweighted``
+are aggregated like every other metric (NaN-aware: pure-strategy hands are NaN and drop out of
+the mean, ``n`` says how many sessions contributed). ``check_e2_criteria`` evaluates the E2
+criteria, either for one condition with the plain agent names (E2-1) or across conditions whose
+transformer agents are tagged ``Transformer(sample)[B]`` (``tag_condition``), all pointwise on
+per-hand means for ``t >= threshold`` with paired one-sided shortfalls, like the E1 criteria.
 """
 
 from __future__ import annotations
@@ -27,9 +34,19 @@ import numpy as np
 
 from exsolver.eval.session import SessionMetrics
 
-METRICS: tuple[str, ...] = ("ev", "realized", "expl", "post_entropy", "agent_entropy", "kl")
+METRICS: tuple[str, ...] = (
+    "ev",
+    "realized",
+    "expl",
+    "post_entropy",
+    "agent_entropy",
+    "kl",
+    "kl_policy",
+    "kl_policy_unweighted",
+)
 FIRST_HANDS = 8
 LAST_HANDS = 16
+KL_POLICY_HANDS: tuple[int, ...] = (16, 32, 63)  # hands the E2 tables report the policy KL at
 _DOMINANCE_TOL = 1e-9
 
 
@@ -41,6 +58,9 @@ class CriteriaNames:
     bayes: str = "BayesBR"
     equilibrium: str = "Equilibrium"
     oracle: str = "OracleBR"
+    transformer_argmax: str = "Transformer(argmax)"
+    thompson: str = "Thompson"
+    plurality: str = "PluralityBR"
 
 
 @dataclass(frozen=True)
@@ -54,6 +74,45 @@ class Thresholds:
     h2_t_from: int = 16  # ... from this hand on
     h2_eq_t_from: int = 4  # transformer EV above Equilibrium from this hand on
     eq_expl: float = 1e-3  # exploitability of the Equilibrium agent is ~0
+
+
+@dataclass(frozen=True)
+class E2Thresholds:
+    """Numbers from docs/experiments/e2-decision-relevant-inference.md "Success criteria"."""
+
+    kl_policy: float = 0.05  # E2-1: policy KL of Transformer(sample) below this ...
+    kl_policy_t_from: int = 16  # ... at every hand from this one on
+    match_gap: float = 0.01  # E2-1: Transformer(sample) vs Thompson, (argmax) vs PluralityBR ...
+    match_t_from: int = 16  # ... paired one-sided shortfall at most match_gap for t >= this
+    bayes_gap: float = 0.02  # E2-2: condition E within this of BayesBR for t >= bayes_t_from
+    bayes_t_from: int = 16
+    ev_change: float = 0.01  # E2-3: |EV change| of C / D versus A below this for t >= ...
+    ev_change_t_from: int = 16
+
+
+@dataclass(frozen=True)
+class E2Roles:
+    """Which condition id plays which role in the E2 criteria (spec table "Conditions")."""
+
+    baseline: str = "A"
+    convergence: str = "B"
+    no_identity: str = "C"
+    forced_identity: str = "D"
+    bayes_labels: str = "E"
+
+
+def tag_condition(name: str, condition: str) -> str:
+    """``"Transformer(sample)"`` + ``"B"`` -> ``"Transformer(sample)[B]"``."""
+    return f"{name}[{condition}]"
+
+
+def split_condition(name: str) -> tuple[str, str | None]:
+    """Inverse of ``tag_condition``: ``("Transformer(sample)", "B")``; ``(name, None)`` untagged."""
+    if name.endswith("]") and "[" in name:
+        base, _, cond = name[:-1].rpartition("[")
+        if base and cond:
+            return base, cond
+    return name, None
 
 
 # ---------------------------------------------------------------------- statistics
@@ -87,7 +146,8 @@ def scalar(x: np.ndarray) -> dict[str, float | int]:
 def _session_means(x: np.ndarray, t_slice: slice) -> np.ndarray:
     """Per-session mean over a slice of hands (nan-aware)."""
     sub = x[:, t_slice]
-    with np.errstate(invalid="ignore"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN rows (e.g. pure-strategy KL)
         return np.nanmean(sub, axis=1) if sub.shape[1] else np.full(x.shape[0], np.nan)
 
 
@@ -125,6 +185,14 @@ def _ordered_agents(metrics: Iterable[SessionMetrics]) -> list[str]:
     for m in metrics:
         seen.setdefault(m.agent, None)
     return list(seen)
+
+
+def group_by_agent(metrics: Iterable[SessionMetrics]) -> dict[str, list[SessionMetrics]]:
+    """Sessions per agent name, agents in order of first appearance."""
+    groups: dict[str, list[SessionMetrics]] = {}
+    for m in metrics:
+        groups.setdefault(m.agent, []).append(m)
+    return groups
 
 
 def _index(group: Sequence[SessionMetrics]) -> dict[tuple[int, int], SessionMetrics]:
@@ -231,6 +299,10 @@ def _summary(
     pe = _stack(group, "post_entropy")
     ae = _stack(group, "agent_entropy")
     realized = _stack(group, "realized")
+    klp = _stack(group, "kl_policy")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN hands (pure strategies)
+        klp_mean, _, _ = mean_se(klp)
     return {
         "ev_first8": scalar(_session_means(ev, slice(0, min(FIRST_HANDS, H)))),
         "ev_last16": scalar(_session_means(ev, slice(max(H - LAST_HANDS, 0), H))),
@@ -241,6 +313,14 @@ def _summary(
         "kl_final": scalar(kl[:, -1]),
         "post_entropy_final": scalar(pe[:, -1]),
         "agent_entropy_final": scalar(ae[:, -1]),
+        # E2: policy KL (NaN-aware; pure-strategy agents have no entries at all)
+        "kl_policy_all": scalar(_session_means(klp, slice(0, H))),
+        "kl_policy_final": scalar(klp[:, -1]),
+        "kl_policy_at": {
+            str(min(t, H - 1)): scalar(klp[:, min(t, H - 1)]) for t in KL_POLICY_HANDS
+        },
+        "kl_at": {str(min(t, H - 1)): scalar(kl[:, min(t, H - 1)]) for t in KL_POLICY_HANDS},
+        "pure_hands_share": float(np.mean([m.n_pure_hands / m.H for m in group])),
     }
 
 
@@ -275,6 +355,137 @@ def _arch_name(arch: int, names: Sequence[str] | None) -> str:
     return str(arch)
 
 
+# ---------------------------------------------------------------------- criterion primitives
+def _clip_t(t: int, H: int) -> tuple[int, bool]:
+    return (min(t, H - 1), t > H - 1)
+
+
+def pointwise_below(
+    group: Sequence[SessionMetrics], field: str, threshold: float, t_from: int, H: int
+) -> dict[str, Any]:
+    """Per-hand mean of ``field`` below ``threshold`` at every hand ``t >= t_from`` (clipped)."""
+    t0, scaled = _clip_t(t_from, H)
+    mean, se, n = mean_se(_stack(group, field))
+    out: dict[str, Any] = {"pass": None, "threshold": threshold, "t": t0, "scaled_to_H": scaled}
+    if not np.all(n[t0:] > 0):
+        out["note"] = f"no {field} recorded at some hand >= {t0}"
+        return out
+    tail = mean[t0:]
+    out.update(
+        {
+            "value_at_t": float(mean[t0]),
+            "value_at_t_se": float(se[t0]),
+            "max_from_t": float(np.max(tail)),
+            "t_of_max": int(t0 + np.argmax(tail)),
+            "n_sessions_at_t": int(n[t0]),
+            "pass": bool(np.all(tail < threshold)),
+        }
+    )
+    return out
+
+
+def paired_shortfall(
+    reference: Sequence[SessionMetrics],
+    group: Sequence[SessionMetrics],
+    field: str,
+    threshold: float,
+    t_from: int,
+    H: int,
+) -> dict[str, Any]:
+    """One-sided: ``mean_sessions(reference - group)`` at most ``threshold`` for every ``t >= t_from``.
+
+    Sessions are paired by ``(opp_id, session)``; being *better* than the reference never fails.
+    """
+    t0, scaled = _clip_t(t_from, H)
+    out: dict[str, Any] = {
+        "pass": None,
+        "threshold": threshold,
+        "t_from": t0,
+        "scaled_to_H": scaled,
+    }
+    short = paired_difference(reference, group, field)
+    if not short.shape[0]:
+        out["note"] = "no sessions paired by (opp_id, session)"
+        return out
+    m, s, _ = mean_se(short)
+    tail = m[t0:]
+    out.update(
+        {
+            "n_paired": int(short.shape[0]),
+            "max_shortfall": float(tail.max()),
+            "t_of_max": int(t0 + tail.argmax()),
+            "mean_shortfall": float(tail.mean()),
+            "mean_shortfall_se": float(np.sqrt(np.mean(s[t0:] ** 2) / tail.size)),
+            "pass": bool(np.all(tail <= threshold)),
+        }
+    )
+    return out
+
+
+def paired_abs_change(
+    a: Sequence[SessionMetrics],
+    b: Sequence[SessionMetrics],
+    field: str,
+    threshold: float,
+    t_from: int,
+    H: int,
+) -> dict[str, Any]:
+    """Two-sided: ``|mean_sessions(a - b)|`` below ``threshold`` at every ``t >= t_from``."""
+    t0, scaled = _clip_t(t_from, H)
+    out: dict[str, Any] = {
+        "pass": None,
+        "threshold": threshold,
+        "t_from": t0,
+        "scaled_to_H": scaled,
+    }
+    diff = paired_difference(a, b, field)
+    if not diff.shape[0]:
+        out["note"] = "no sessions paired by (opp_id, session)"
+        return out
+    m, s, _ = mean_se(diff)
+    tail = m[t0:]
+    out.update(
+        {
+            "n_paired": int(diff.shape[0]),
+            "max_abs_change": float(np.abs(tail).max()),
+            "t_of_max": int(t0 + np.abs(tail).argmax()),
+            "mean_change": float(tail.mean()),
+            "mean_change_se": float(np.sqrt(np.mean(s[t0:] ** 2) / tail.size)),
+            "pass": bool(np.all(np.abs(tail) < threshold)),
+        }
+    )
+    return out
+
+
+def paired_lower_at_every_hand(
+    lower: Sequence[SessionMetrics], higher: Sequence[SessionMetrics], field: str
+) -> dict[str, Any]:
+    """``mean_sessions(higher - lower) > 0`` at every hand (paired; NaN hands are skipped)."""
+    out: dict[str, Any] = {"pass": None}
+    diff = paired_difference(higher, lower, field)
+    if not diff.shape[0]:
+        out["note"] = "no sessions paired by (opp_id, session)"
+        return out
+    m, s, n = mean_se(diff)
+    ok = n > 0
+    if not ok.any():
+        out["note"] = f"no {field} recorded"
+        return out
+    margin = m[ok]
+    out.update(
+        {
+            "n_paired": int(diff.shape[0]),
+            "n_hands_compared": int(ok.sum()),
+            "min_margin": float(margin.min()),
+            "t_of_min": int(np.flatnonzero(ok)[margin.argmin()]),
+            "mean_margin": float(margin.mean()),
+            "n_hands_failing": int(np.sum(margin <= 0.0)),
+            "pass": bool(np.all(margin > 0.0)),
+        }
+    )
+    return out
+
+
 # ---------------------------------------------------------------------- success criteria
 def check_criteria(
     groups: dict[str, list[SessionMetrics]],
@@ -296,28 +507,27 @@ def check_criteria(
     out: dict[str, Any] = {"resolved_agents": resolved, "thresholds": asdict(thresholds)}
 
     def clip_t(t: int) -> tuple[int, bool]:
-        return (min(t, H - 1), t > H - 1)
+        return _clip_t(t, H)
 
     # H1: KL(exact || model) < 0.1 nats from hand 32 on; entropy tracks within 0.2 nats.
     h1_kl: dict[str, Any] = {"pass": None, "agent": tr, "threshold": thresholds.h1_kl}
     h1_ent: dict[str, Any] = {"pass": None, "agent": tr, "threshold": thresholds.h1_entropy_gap}
     if tr is not None:
-        t0, scaled = clip_t(thresholds.h1_t)
-        kl_mean, kl_se, kl_n = mean_se(_stack(groups[tr], "kl"))
-        if np.all(kl_n[t0:] > 0):
-            tail = kl_mean[t0:]
+        below = pointwise_below(groups[tr], "kl", thresholds.h1_kl, thresholds.h1_t, H)
+        if below.get("note"):
+            h1_kl.update({"t": below["t"], "scaled_to_H": below["scaled_to_H"]})
+            h1_kl["note"] = "no KL recorded (agent has no belief or no exact posterior given)"
+        else:
             h1_kl.update(
                 {
-                    "t": t0,
-                    "scaled_to_H": scaled,
-                    "kl_at_t": float(kl_mean[t0]),
-                    "kl_at_t_se": float(kl_se[t0]),
-                    "kl_max_from_t": float(np.max(tail)),
-                    "pass": bool(np.all(tail < thresholds.h1_kl)),
+                    "t": below["t"],
+                    "scaled_to_H": below["scaled_to_H"],
+                    "kl_at_t": below["value_at_t"],
+                    "kl_at_t_se": below["value_at_t_se"],
+                    "kl_max_from_t": below["max_from_t"],
+                    "pass": below["pass"],
                 }
             )
-        else:
-            h1_kl["note"] = "no KL recorded (agent has no belief or no exact posterior given)"
         pe_mean, _, pe_n = mean_se(_stack(groups[tr], "post_entropy"))
         ae_mean, _, ae_n = mean_se(_stack(groups[tr], "agent_entropy"))
         ok = (pe_n > 0) & (ae_n > 0)
@@ -344,24 +554,11 @@ def check_criteria(
         "threshold": thresholds.h2_gap,
     }
     if tr is not None and bayes is not None:
-        t0, scaled = clip_t(thresholds.h2_t_from)
-        short = paired_difference(groups[bayes], groups[tr], "ev")  # bayes - transformer
-        if short.shape[0]:
-            m, s, _ = mean_se(short)
-            tail = m[t0:]
-            h2_b.update(
-                {
-                    "t_from": t0,
-                    "scaled_to_H": scaled,
-                    "n_paired": int(short.shape[0]),
-                    "max_shortfall": float(tail.max()),
-                    "mean_shortfall": float(tail.mean()),
-                    "mean_shortfall_se": float(np.sqrt(np.mean(s[t0:] ** 2) / tail.size)),
-                    "pass": bool(np.all(tail <= thresholds.h2_gap)),
-                }
-            )
-        else:
-            h2_b["note"] = "no sessions paired by (opp_id, session)"
+        short = paired_shortfall(
+            groups[bayes], groups[tr], "ev", thresholds.h2_gap, thresholds.h2_t_from, H
+        )  # bayes - transformer
+        short.pop("t_of_max", None)
+        h2_b.update(short)
     out["H2_within_bayes"] = h2_b
 
     h2_e: dict[str, Any] = {"pass": None, "agent": tr, "versus": eq}
@@ -420,6 +617,201 @@ def check_criteria(
         eq_x.update({"expl_mean": float(expl.mean()), "expl_max": float(expl.max())})
         eq_x["pass"] = bool(expl.max() < thresholds.eq_expl)
     out["sanity_equilibrium_exploitability"] = eq_x
+    return out
+
+
+# ---------------------------------------------------------------------- E2 criteria
+def _e2_entry(description: str, **fields: Any) -> dict[str, Any]:
+    return {"pass": None, "description": description, **fields}
+
+
+def _e2_absent(
+    entry: dict[str, Any], missing: list[str], conditions: dict[str, str] | None
+) -> None:
+    pending = [
+        n
+        for n in missing
+        if conditions is not None and conditions.get(split_condition(n)[1] or "", "") == "pending"
+    ]
+    if pending:
+        entry["note"] = f"condition pending (checkpoint not trained yet): {', '.join(pending)}"
+    else:
+        entry["note"] = f"agent(s) absent: {', '.join(missing)}"
+
+
+def check_e2_criteria(
+    groups: dict[str, list[SessionMetrics]],
+    H: int,
+    *,
+    names: CriteriaNames | None = None,
+    thresholds: E2Thresholds | None = None,
+    conditions: dict[str, str] | None = None,
+    roles: E2Roles | None = None,
+) -> dict[str, Any]:
+    """E2-1 / E2-2 / E2-3 as ``{"pass": bool | None, "description": str, ...numbers}`` entries.
+
+    ``conditions`` is ``None`` for a single-condition aggregate with plain agent names (only the
+    E2-1 checks apply), or ``{condition_id: "evaluated" | "pending"}`` for the combined
+    aggregate whose transformer agents are tagged ``tag_condition(name, id)``; ``roles`` says
+    which id is the baseline (E2-1), the convergence run (E2-3a), the ``lambda_opp`` variants
+    (E2-3b) and the Bayes-BR-label run (E2-2). Checks whose agents are absent get ``pass: None``
+    and a note saying whether the condition is pending. Hand thresholds are clipped to ``H - 1``
+    and flagged ``scaled_to_H`` like the E1 criteria.
+    """
+    names = names or CriteriaNames()
+    th = thresholds or E2Thresholds()
+    roles = roles or E2Roles()
+    present = list(groups)
+
+    def res(base: str, cond: str | None) -> str | None:
+        want = base if cond is None else tag_condition(base, cond)
+        if want in present:
+            return want
+        return resolve_agent(present, want) if cond is None else None
+
+    def tr(mode: str, cond: str | None) -> str | None:
+        return res(names.transformer if mode == "sample" else names.transformer_argmax, cond)
+
+    def want(mode: str, cond: str | None) -> str:
+        base = names.transformer if mode == "sample" else names.transformer_argmax
+        return base if cond is None else tag_condition(base, cond)
+
+    thompson, plural, bayes = (res(n, None) for n in (names.thompson, names.plurality, names.bayes))
+    base_cond = None if conditions is None else roles.baseline
+    suffix = "" if base_cond is None else f"[{base_cond}]"
+    out: dict[str, Any] = {
+        "thresholds": asdict(th),
+        "roles": None if conditions is None else asdict(roles),
+        "conditions": conditions,
+        "resolved_agents": {"thompson": thompson, "plurality": plural, "bayes": bayes},
+    }
+
+    # E2-1a: policy KL of Transformer(sample) below 0.05 nats from t = 16 on
+    e = _e2_entry(
+        f"policy KL of {want('sample', base_cond)} < {th.kl_policy} nats at every t >= {th.kl_policy_t_from}",
+        agent=tr("sample", base_cond),
+    )
+    if e["agent"] is not None:
+        e.update(
+            pointwise_below(groups[e["agent"]], "kl_policy", th.kl_policy, th.kl_policy_t_from, H)
+        )
+    else:
+        _e2_absent(e, [want("sample", base_cond)], conditions)
+    out[f"E2-1a_kl_policy{suffix}"] = e
+
+    # E2-1b / E2-1c: sample within 0.01 of Thompson, argmax within 0.01 of PluralityBR (paired)
+    for key, mode, ref_name, ref in (
+        ("E2-1b_sample_within_thompson", "sample", names.thompson, thompson),
+        ("E2-1c_argmax_within_plurality", "argmax", names.plurality, plural),
+    ):
+        agent = tr(mode, base_cond)
+        e = _e2_entry(
+            f"{want(mode, base_cond)} EV within {th.match_gap} chips/hand of {ref_name} for t >= {th.match_t_from} (paired, one-sided)",
+            agent=agent,
+            versus=ref,
+        )
+        if agent is not None and ref is not None:
+            e.update(
+                paired_shortfall(groups[ref], groups[agent], "ev", th.match_gap, th.match_t_from, H)
+            )
+        else:
+            _e2_absent(
+                e,
+                [n for n, r in ((want(mode, base_cond), agent), (ref_name, ref)) if r is None],
+                conditions,
+            )
+        out[f"{key}{suffix}"] = e
+
+    if conditions is None:
+        return out
+
+    # E2-2: condition E within 0.02 of BayesBR for t >= 16 (both modes reported)
+    for mode in ("sample", "argmax"):
+        agent = tr(mode, roles.bayes_labels)
+        e = _e2_entry(
+            f"{want(mode, roles.bayes_labels)} EV within {th.bayes_gap} chips/hand of {names.bayes} for t >= {th.bayes_t_from} (paired, one-sided)",
+            agent=agent,
+            versus=bayes,
+        )
+        if agent is not None and bayes is not None:
+            e.update(
+                paired_shortfall(
+                    groups[bayes], groups[agent], "ev", th.bayes_gap, th.bayes_t_from, H
+                )
+            )
+        else:
+            _e2_absent(
+                e,
+                [
+                    n
+                    for n, r in ((want(mode, roles.bayes_labels), agent), (names.bayes, bayes))
+                    if r is None
+                ],
+                conditions,
+            )
+        out[f"E2-2_{mode}_within_bayes[{roles.bayes_labels}]"] = e
+
+    # E2-3a: condition B's identity KL below condition A's at every t (Transformer(sample))
+    a, b = tr("sample", roles.baseline), tr("sample", roles.convergence)
+    e = _e2_entry(
+        f"identity KL of {want('sample', roles.convergence)} below {want('sample', roles.baseline)} at every hand (paired)",
+        agent=b,
+        versus=a,
+    )
+    if a is not None and b is not None:
+        e.update(paired_lower_at_every_hand(groups[b], groups[a], "kl"))
+    else:
+        _e2_absent(
+            e,
+            [
+                n
+                for n, r in (
+                    (want("sample", roles.convergence), b),
+                    (want("sample", roles.baseline), a),
+                )
+                if r is None
+            ],
+            conditions,
+        )
+    out[f"E2-3a_identity_kl[{roles.convergence}]<[{roles.baseline}]"] = e
+
+    # E2-3b: conditions C / D change the transformer's EV by less than 0.01 (both modes)
+    for cond in (roles.no_identity, roles.forced_identity):
+        e = _e2_entry(
+            f"|EV change| of Transformer[{cond}] versus Transformer[{roles.baseline}] < {th.ev_change} chips/hand for t >= {th.ev_change_t_from}, both modes (paired)",
+        )
+        missing = []
+        per_mode: dict[str, Any] = {}
+        for mode in ("sample", "argmax"):
+            x, y = tr(mode, cond), tr(mode, roles.baseline)
+            if x is None:
+                missing.append(want(mode, cond))
+            if y is None:
+                missing.append(want(mode, roles.baseline))
+            if x is not None and y is not None:
+                per_mode[mode] = paired_abs_change(
+                    groups[x], groups[y], "ev", th.ev_change, th.ev_change_t_from, H
+                )
+        if missing:
+            _e2_absent(e, sorted(set(missing)), conditions)
+        else:
+            e.update(
+                {
+                    "threshold": th.ev_change,
+                    "t_from": per_mode["sample"]["t_from"],
+                    "scaled_to_H": per_mode["sample"]["scaled_to_H"],
+                    "max_abs_change_sample": per_mode["sample"].get("max_abs_change"),
+                    "max_abs_change_argmax": per_mode["argmax"].get("max_abs_change"),
+                    "mean_change_sample": per_mode["sample"].get("mean_change"),
+                    "mean_change_argmax": per_mode["argmax"].get("mean_change"),
+                    "pass": None
+                    if any(v["pass"] is None for v in per_mode.values())
+                    else bool(all(v["pass"] for v in per_mode.values())),
+                }
+            )
+            if any(v.get("note") for v in per_mode.values()):
+                e["note"] = "; ".join(v["note"] for v in per_mode.values() if v.get("note"))
+        out[f"E2-3b_ev_change[{cond}]vs[{roles.baseline}]"] = e
     return out
 
 

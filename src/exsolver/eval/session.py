@@ -30,6 +30,26 @@ Deviations from docs/experiments/e1-kuhn.md ("Session runner and metrics"):
   wherever the exact posterior has mass, so a zero-mass miss contributes at most
   ``-log(1e-30) ~= 69.08`` nats per element (never inf). ``entropy`` and ``kl_divergence`` reject
   non-finite or negative inputs themselves, so standalone callers get errors too.
+
+E2 addition (docs/experiments/e2-decision-relevant-inference.md, "New exact quantities"): an
+optional ``reference`` (``exsolver.eval.reference.BRActionReference``, built by the runner from
+the population; never handed to the agent) supplies, before every hand and from the exact
+posterior the evaluator already holds, the posterior over best-response actions ``pi*_t`` and
+the reach weights ``w_t`` over the agent's infosets at the played seat. The runner records
+
+    kl_policy[t]            = sum_I w_t(I) KL(pi*_t(.|I) || sigma_t(.|I))
+    kl_policy_unweighted[t] = mean_I KL(pi*_t(.|I) || sigma_t(.|I))
+
+with the same 1e-30 floor on ``sigma_t`` as the belief KL (at most 69.08 nats per infoset).
+``w_t`` is the probability of the agent's card times the probability of reaching the infoset's
+history when the agent plays ``pi*_t`` against the posterior-mixture opponent, normalised to sum
+to one over the seat's infosets; unreachable infosets get weight zero (details in
+``exsolver.eval.reference``). **Both values are NaN when ``sigma_t`` is a pure strategy** (every
+row of the seat one-hot: Thompson, BayesBR, PluralityBR, OracleBR, Transformer(argmax)): the
+KL from a mixed target to a point mass is dominated by the floor cap wherever ``pi*_t`` spreads
+mass and says nothing about the policy's quality; it is recorded for mixed strategies only
+(Transformer(sample), Equilibrium, Random, ``FixedStrategyAgent`` mixtures). Pure hands are
+counted in ``SessionMetrics.n_pure_hands``.
 """
 
 from __future__ import annotations
@@ -42,7 +62,8 @@ from typing import Any, Protocol
 import numpy as np
 
 from exsolver.data.records import HandRecord, SessionContext
-from exsolver.games.base import CALL, RAISE, Game
+from exsolver.games.base import CALL, N_ACTIONS, RAISE, Game
+from exsolver.games.tree import compile_tree
 from exsolver.play import play_hand
 from exsolver.solvers.best_response import expected_value, seat_exploitability
 from exsolver.strategy import TabularStrategy, seat_of_key
@@ -59,6 +80,11 @@ KUHN_PROBES: dict[str, tuple[Probe, ...]] = {
 BELIEF_FLOOR = 1e-30  # KL guard: a belief of exactly 0 where the truth has mass is capped here
 BELIEF_FLOOR_CAP_NATS = -math.log(BELIEF_FLOOR)  # ~69.08 nats per element
 BELIEF_SUM_TOL = 1e-6
+PURE_STRATEGY_REASON = (
+    "kl_policy is NaN for a pure hand-t strategy (every row one-hot): the KL from the mixed "
+    "target pi*_t to a point mass is dominated by the 1e-30 floor cap and does not measure the "
+    "policy's quality; it is recorded for mixed strategies only"
+)
 
 
 class Agent(Protocol):
@@ -85,6 +111,17 @@ class Posterior(Protocol):
     def entropy(self) -> float: ...
 
 
+class Reference(Protocol):
+    """Duck-typed E2 reference (``exsolver.eval.reference.BRActionReference``).
+
+    ``policy_target(seat, probs)`` returns ``(pi_star, weights)``: ``pi*_t`` rows
+    ``[I_seat, 3]`` over the infosets of ``seat`` in enumeration order and the reach weights
+    ``[I_seat]`` (non-negative, sum one), both computed from the exact posterior ``probs``.
+    """
+
+    def policy_target(self, seat: int, probs: np.ndarray) -> tuple[np.ndarray, np.ndarray]: ...
+
+
 class FixedStrategyAgent:
     """Evaluation utility / test double: plays a fixed profile, learns nothing, has no belief."""
 
@@ -106,6 +143,19 @@ class FixedStrategyAgent:
         return None
 
 
+METRIC_FIELDS: tuple[str, ...] = (
+    "seats",
+    "ev",
+    "realized",
+    "expl",
+    "post_entropy",
+    "agent_entropy",
+    "kl",
+    "kl_policy",
+    "kl_policy_unweighted",
+)
+
+
 @dataclass
 class SessionMetrics:
     """Per-hand metrics of one session (arrays of length ``H``; NaN where undefined)."""
@@ -123,6 +173,18 @@ class SessionMetrics:
     kl: np.ndarray  # KL(exact || agent.belief) before hand t (nats)
     probes: dict[str, np.ndarray] = field(default_factory=dict)
     n_showdowns: int = 0
+    # E2: reach-weighted / plain-mean KL(pi*_t || sigma_t) over the seat's infosets (nats); NaN
+    # without a reference and on hands where sigma_t is pure (see PURE_STRATEGY_REASON)
+    kl_policy: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    kl_policy_unweighted: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    n_pure_hands: int = 0
+
+    def __post_init__(self) -> None:
+        H = self.H
+        if self.kl_policy.shape != (H,):
+            self.kl_policy = np.full(H, np.nan)
+        if self.kl_policy_unweighted.shape != (H,):
+            self.kl_policy_unweighted = np.full(H, np.nan)
 
     @property
     def H(self) -> int:
@@ -135,8 +197,9 @@ class SessionMetrics:
             "archetype": self.archetype,
             "session": self.session,
             "n_showdowns": self.n_showdowns,
+            "n_pure_hands": self.n_pure_hands,
         }
-        for k in ("seats", "ev", "realized", "expl", "post_entropy", "agent_entropy", "kl"):
+        for k in METRIC_FIELDS:
             out[k] = getattr(self, k).tolist()
         out["probes"] = {k: v.tolist() for k, v in self.probes.items()}
         return out
@@ -177,6 +240,70 @@ def kl_divergence(p: np.ndarray, q: np.ndarray) -> float:
         raise ValueError(f"belief shapes differ: {p.shape} vs {q.shape}")
     sup = p > 0.0
     return float((p[sup] * (np.log(p[sup]) - np.log(np.maximum(q[sup], BELIEF_FLOOR)))).sum())
+
+
+def kl_rows(p: np.ndarray, q: np.ndarray) -> np.ndarray:
+    """Row-wise ``KL(p_i || q_i)`` in nats for ``[n, k]`` arrays, ``q`` floored at ``BELIEF_FLOOR``.
+
+    Same convention as ``kl_divergence`` (support of ``p``, cap of ~69.08 nats per element);
+    raises ``ValueError`` on shape mismatch or non-finite / negative entries.
+    """
+    p2 = np.asarray(p, dtype=np.float64)
+    q2 = np.asarray(q, dtype=np.float64)
+    if p2.ndim != 2 or p2.shape != q2.shape:
+        raise ValueError(f"kl_rows: shapes {p2.shape} and {q2.shape} must be equal 2-D")
+    _probability_vector(p2, "kl_rows: p")
+    _probability_vector(q2, "kl_rows: q")
+    sup = p2 > 0.0
+    terms = np.where(
+        sup, p2 * (np.log(np.where(sup, p2, 1.0)) - np.log(np.maximum(q2, BELIEF_FLOOR))), 0.0
+    )
+    return terms.sum(axis=1)
+
+
+def is_pure(rows: np.ndarray) -> bool:
+    """True if every strategy row is one-hot (exactly one entry equal to 1)."""
+    r = np.asarray(rows, dtype=np.float64)
+    return bool(np.all(r.max(axis=1) == 1.0))
+
+
+def check_rows(rows: Any, n: int, who: str) -> np.ndarray:
+    """Validate ``[n, 3]`` probability rows (finite, non-negative, each summing to one)."""
+    r = np.asarray(rows, dtype=np.float64)
+    if r.shape != (n, N_ACTIONS):
+        raise ValueError(f"{who}: expected shape {(n, N_ACTIONS)}, got {r.shape}")
+    _probability_vector(r, who)
+    if np.any(np.abs(r.sum(axis=1) - 1.0) > BELIEF_SUM_TOL):
+        raise ValueError(f"{who}: rows must sum to 1 (tolerance {BELIEF_SUM_TOL})")
+    return r
+
+
+def check_weights(weights: Any, n: int, who: str) -> np.ndarray:
+    """Validate reach weights: length ``n``, finite, non-negative, summing to one."""
+    w = _probability_vector(weights, who)
+    if w.shape != (n,):
+        raise ValueError(f"{who}: expected {n} weights, got shape {w.shape}")
+    if abs(float(w.sum()) - 1.0) > BELIEF_SUM_TOL:
+        raise ValueError(f"{who}: weights sum to {w.sum()!r}, not 1")
+    return w
+
+
+def policy_kl(
+    pi_star: np.ndarray, weights: np.ndarray, sigma_rows: np.ndarray
+) -> tuple[float, float]:
+    """``(sum_I w(I) KL(pi*(.|I) || sigma(.|I)), mean_I KL(...))`` over aligned ``[I, 3]`` rows.
+
+    Returns ``(nan, nan)`` when ``sigma_rows`` is a pure strategy (``PURE_STRATEGY_REASON``).
+    Inputs are validated (rows are probability vectors, weights sum to one).
+    """
+    n = np.asarray(sigma_rows).shape[0]
+    p = check_rows(pi_star, n, "policy_kl: pi_star")
+    q = check_rows(sigma_rows, n, "policy_kl: sigma")
+    w = check_weights(weights, n, "policy_kl: weights")
+    if is_pure(q):
+        return math.nan, math.nan
+    kl = kl_rows(p, q)
+    return float((w * kl).sum()), float(kl.mean())
 
 
 def check_belief(belief: Any, m: int | None, who: str) -> np.ndarray:
@@ -242,6 +369,7 @@ def run_session(
     archetype: int = -1,
     session: int = 0,
     n_opp: int | None = None,
+    reference: Reference | None = None,
 ) -> SessionMetrics:
     """Play ``H`` hands (agent at seat ``t % 2``) and record exact per-hand metrics.
 
@@ -255,9 +383,17 @@ def run_session(
 
     Beliefs are validated against the population size ``M``: the posterior's length when one is
     given, else ``n_opp``, else the length of the agent's first belief (later hands must agree).
+
+    ``reference`` (E2; requires ``posterior``) yields ``pi*_t`` and ``w_t`` from the exact
+    posterior before each hand; ``kl_policy`` / ``kl_policy_unweighted`` are recorded per hand
+    (NaN for pure hand-``t`` strategies, see the module docstring). The reference is read by the
+    evaluator only and never passed to the agent.
     """
     if H < 1:
         raise ValueError("H must be >= 1")
+    if reference is not None and posterior is None:
+        raise ValueError("a reference needs the exact posterior: pass posterior= as well")
+    tree = compile_tree(game)
     deal_rng, opp_rng, act_rng, agent_rng = _split_rng(rng, 4)
     probes = _normalise_probes(game, probe_keys)
     probe_by_seat: dict[str, dict[int, Probe]] = {
@@ -277,8 +413,11 @@ def run_session(
     post_entropy = np.full(H, np.nan)
     agent_entropy = np.full(H, np.nan)
     kl = np.full(H, np.nan)
+    kl_policy = np.full(H, np.nan)
+    kl_policy_unw = np.full(H, np.nan)
     probe_vals = {name: np.full(H, np.nan) for name in probes}
     n_showdowns = 0
+    n_pure = 0
 
     agent.reset(agent_rng)
     ctx = SessionContext(hands=[])
@@ -310,6 +449,14 @@ def run_session(
             agent_entropy[t] = entropy(belief)
             if exact is not None:
                 kl[t] = kl_divergence(exact, belief)
+        if reference is not None and exact is not None:
+            pi_star, weights = reference.policy_target(seat, exact)
+            rows = tree.dense_from_strategy(sigma, (seat,))[tree.infoset_rows[seat]]
+            try:
+                kl_policy[t], kl_policy_unw[t] = policy_kl(pi_star, weights, rows)
+            except ValueError as e:
+                raise ValueError(f"agent {agent.name!r}, hand {t}, seat {seat}: {e}") from None
+            n_pure += math.isnan(kl_policy[t])
 
         hand, _decisions = play_hand(
             game, seat, sigma, opp_profile, deal_rng, agent_rng=act_rng, opp_rng=opp_rng
@@ -335,6 +482,9 @@ def run_session(
         kl=kl,
         probes=probe_vals,
         n_showdowns=int(n_showdowns),
+        kl_policy=kl_policy,
+        kl_policy_unweighted=kl_policy_unw,
+        n_pure_hands=int(n_pure),
     )
 
 

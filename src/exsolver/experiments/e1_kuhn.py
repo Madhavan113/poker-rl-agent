@@ -64,7 +64,14 @@ from tqdm import tqdm
 from exsolver.data.shards import read_meta, shard_paths
 from exsolver.eval.aggregate import aggregate
 from exsolver.eval.plots import write_all_plots, write_summary_md
-from exsolver.eval.session import Agent, Posterior, SessionMetrics, run_session
+from exsolver.eval.session import (
+    METRIC_FIELDS,
+    Agent,
+    Posterior,
+    Reference,
+    SessionMetrics,
+    run_session,
+)
 from exsolver.games.kuhn import KuhnPoker
 from exsolver.population.kuhn_prior import KuhnPrior, nash_theta, theta_to_profile
 from exsolver.population.population import Population, sample_population
@@ -615,14 +622,18 @@ def evaluate_population(
     seed: int,
     equilibrium_value_seat0: float = KUHN_GAME_VALUE_SEAT0,
     progress: bool = False,
+    reference: Reference | None = None,
 ) -> list[SessionMetrics]:
     """Every opponent x ``sessions_per_opp`` sessions x every agent.
 
     The generator for ``(opp_id, session)`` is seeded identically for every agent, and
     ``run_session`` splits it into deal / opponent / agent streams, so all agents face the same
     cards. ``oracle_factory(theta)`` builds the per-opponent oracle; ``posterior_factory()`` a
-    fresh exact posterior per session (evaluator-side only).
+    fresh exact posterior per session (evaluator-side only). ``reference`` (E2, stateless: it is
+    read with each session's posterior) enables the policy-level KL; it requires a posterior.
     """
+    if reference is not None and posterior_factory is None:
+        raise ValueError("a reference needs posterior_factory (the exact posterior)")
     metrics: list[SessionMetrics] = []
     it = tqdm(
         range(len(pop)), disable=not progress, desc="eval", file=sys.stderr, dynamic_ncols=True
@@ -650,6 +661,7 @@ def evaluate_population(
                         archetype=int(pop.archetypes[opp_id]),
                         session=s,
                         n_opp=len(pop),
+                        reference=reference,
                     )
                 )
     return metrics
@@ -683,8 +695,9 @@ def equilibrium_sanity(
 
 def save_sessions(metrics: Sequence[SessionMetrics], path: Path) -> None:
     """Raw per-session arrays (``[N, H]`` per metric) so any aggregate can be recomputed."""
-    fields = ("seats", "ev", "realized", "expl", "post_entropy", "agent_entropy", "kl")
-    arrays: dict[str, np.ndarray] = {f: np.stack([getattr(m, f) for m in metrics]) for f in fields}
+    arrays: dict[str, np.ndarray] = {
+        f: np.stack([getattr(m, f) for m in metrics]) for f in METRIC_FIELDS
+    }
     for probe in metrics[0].probes:
         arrays[f"probe_{probe}"] = np.stack([m.probes[probe] for m in metrics])
     arrays["agent"] = np.asarray([m.agent for m in metrics], dtype=str)
@@ -692,6 +705,7 @@ def save_sessions(metrics: Sequence[SessionMetrics], path: Path) -> None:
     arrays["archetype"] = np.asarray([m.archetype for m in metrics], dtype=np.int64)
     arrays["session"] = np.asarray([m.session for m in metrics], dtype=np.int64)
     arrays["n_showdowns"] = np.asarray([m.n_showdowns for m in metrics], dtype=np.int64)
+    arrays["n_pure_hands"] = np.asarray([m.n_pure_hands for m in metrics], dtype=np.int64)
     np.savez_compressed(path, **arrays)
 
 
