@@ -1,0 +1,8 @@
+{
+  "seed": 0,
+  "m": 256,
+  "prior": "KuhnPrior",
+  "content_sha256": "eaaaad249bb36c40be6ce4a531ad57c409ff74ae2bd5b3e4b492e52cc038434b",
+  "created_at": "2026-09-13T05:35:56",
+  "command": "uv run python -m exsolver.experiments.e1_kuhn eval --out runs/e1 --data data/e1a --device auto --no-progress"
+}
