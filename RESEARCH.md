@@ -207,7 +207,7 @@ capture.
 | phase | game | what is exact | experiments |
 |------:|------|---------------|-------------|
 | 0 | Kuhn | everything: EV, BR, exploitability, posterior | **E1** in-context Bayes (spec: `docs/experiments/e1-kuhn.md`); **E2** label variants Thompson vs Bayes-BR vs IDS vs RL fine-tune, size of the value-of-information gap; **E3** continuous prior, out-of-prior opponents, ablate the opponent head |
-| 1 | Leduc | EV, BR, exploitability (≈1k infosets) | **E4** perturbed-CFR population, does inference scale; **E5** safety knobs (KL to equilibrium, RNR mixing), Pareto frontier |
+| 1 | Leduc | EV, BR, exploitability (≈1k infosets) | **E4** perturbed-CFR population, does inference scale; **E5** population node-locking: hard/soft locks and RNR mixing against static and adaptive opponents, Pareto frontier (spec: `docs/experiments/e5-population-nodelock.md`) |
 | 2 | limit hold'em or an HUNL abstraction | nothing; Monte Carlo + AIVAT | **E6** hierarchical hand→session model, long sessions; **E7** non-stationary and adaptive opponents, self-exploitation dynamics; **E8** RL fine-tuning against a league |
 | 3 | HUNL | — | **E9** search hybrid: transformer belief → depth-limited subgame solving against the posterior-mixture opponent (Restricted Nash Response with a learned model); ACPC and human data as prior calibration |
 
@@ -300,3 +300,7 @@ once sessions exceed a few thousand tokens; heads for action, value, and opponen
 - 2026-09-13 — No Docker, no services: single-machine research code (see `README.md`).
 - 2026-09-15 — H1 retired in favour of the policy-level KL (E2); the identity head stays as a diagnostic.
   BayesBR labels (condition E2-E) become the primary route to closing the gap to the myopic Bayes-optimal agent.
+- 2026-11-26 — E5 brought forward as a "population solver" question: lock the tree to the inferred,
+  unbalanced opponent and re-solve, versus plain CFR and versus full best response. A Kuhn prototype put
+  most of the value in inference (population prior) and RNR mixing, not in partial node locks; E5 tests
+  that in Leduc with opponents that adapt. E4's perturbed-CFR population is built inside E5.
