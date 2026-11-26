@@ -91,7 +91,10 @@ class LockedCFR:
 
     ``seat`` is our (free) seat; ``batch`` the number of independent instances. Call ``solve``
     repeatedly with changing locks: regrets persist between calls (warm start), the average is
-    restarted at every call. ``reset`` drops the regrets.
+    restarted at every call. ``reset`` drops the regrets. A warm start helps when the lock drifts
+    slightly and can be a little worse than a cold start after a large change; switching between
+    node-lock and RNR games resets the adversary's regrets. After each call ``adversary`` holds the
+    adversary's average strategy, which certifies the solution through ``duality_gap``.
     """
 
     def __init__(self, game: Game, seat: int, batch: int) -> None:
@@ -113,6 +116,7 @@ class LockedCFR:
         shape = (self.batch, self.tree.n_infosets, N_ACTIONS)
         self.regrets = np.zeros(shape)
         self.sigma = np.broadcast_to(self._uniform, shape).copy()
+        self._mode: str | None = None
 
     def _rm_plus(self, rows: np.ndarray) -> None:
         legal = self._legal[rows]
@@ -122,9 +126,12 @@ class LockedCFR:
             tot > 0.0, pos / np.where(tot > 0.0, tot, 1.0), self._uniform[rows]
         )
 
-    def _update(self, rows: np.ndarray, q: np.ndarray) -> None:
+    def _update(self, rows: np.ndarray, q: np.ndarray, scale: np.ndarray | float = 1.0) -> None:
+        """Regret-matching+ step; ``scale`` weights the instantaneous regret (``1 - c`` for the
+        adversary's share of an infoset, ``1 - p`` under RNR) so that regrets accumulated under
+        different locks or confidences stay commensurate across warm starts."""
         base = (self.sigma[:, rows] * q[:, rows]).sum(axis=-1, keepdims=True)
-        inst = (q[:, rows] - base) * self._legal[rows]
+        inst = (q[:, rows] - base) * self._legal[rows] * scale
         self.regrets[:, rows] = np.maximum(self.regrets[:, rows] + inst, 0.0)
         self._rm_plus(rows)
 
@@ -160,23 +167,33 @@ class LockedCFR:
                 raise ValueError("conf entries must lie in [0, 1]")
         elif not 0.0 <= float(rnr_p) <= 1.0:  # type: ignore[arg-type]
             raise ValueError("rnr_p must lie in [0, 1]")
+        mode = "conf" if conf is not None else "rnr"
+        if self._mode is not None and mode != self._mode:
+            # the adversary's regrets mean different things in the two games: start it afresh
+            self.regrets[:, r_opp] = 0.0
+            self.sigma[:, r_opp] = self._uniform[r_opp]
+        self._mode = mode
 
         avg = np.zeros((self.batch, r_us.size, N_ACTIONS))
+        adv = np.zeros((self.batch, r_opp.size, N_ACTIONS))
         parent = t.infoset_parent_seq[r_us]
+        parent_opp = t.infoset_parent_seq[r_opp]
         passes = self._passes
         for it in range(1, iterations + 1):
             # opponent (free part) first, then us, each against the other's current strategy
             if conf is not None:
                 eff = self.sigma.copy()
                 eff[:, r_opp] = c * lock[:, r_opp] + (1.0 - c) * self.sigma[:, r_opp]
-                q, _ = passes.cf_values(eff, opp)
-                self._update(r_opp, q)
+                q, rho_o = passes.cf_values(eff, opp)
+                adv += (it * rho_o[:, parent_opp])[:, :, None] * eff[:, r_opp]
+                self._update(r_opp, q, 1.0 - c)
                 eff[:, r_opp] = c * lock[:, r_opp] + (1.0 - c) * self.sigma[:, r_opp]
                 q, rho = passes.cf_values(eff, ours)
             else:
                 p = float(rnr_p)  # type: ignore[arg-type]
-                q, _ = passes.cf_values(self.sigma, opp)
-                self._update(r_opp, q)
+                q, rho_o = passes.cf_values(self.sigma, opp)
+                adv += (it * rho_o[:, parent_opp])[:, :, None] * self.sigma[:, r_opp]
+                self._update(r_opp, q, 1.0 - p)
                 q_free, rho = passes.cf_values(self.sigma, ours)
                 model = self.sigma.copy()
                 model[:, r_opp] = lock[:, r_opp]
@@ -188,6 +205,16 @@ class LockedCFR:
         out = np.broadcast_to(self._uniform, (self.batch, t.n_infosets, N_ACTIONS)).copy()
         tot = avg.sum(axis=-1, keepdims=True)
         out[:, r_us] = np.where(tot > 0.0, avg / np.where(tot > 0.0, tot, 1.0), self._uniform[r_us])
+        # the adversary's average: the effective (locked + free) strategy under a node lock,
+        # the free adversary tau under RNR; it certifies the solution (see ``duality_gap``)
+        self.adversary = np.broadcast_to(self._uniform, out.shape).copy()
+        tot = adv.sum(axis=-1, keepdims=True)
+        fallback = np.broadcast_to(self._uniform[r_opp], adv.shape)
+        if conf is not None:
+            fallback = c * lock[:, r_opp] + (1.0 - c) * self._uniform[r_opp]
+        self.adversary[:, r_opp] = np.where(
+            tot > 0.0, adv / np.where(tot > 0.0, tot, 1.0), fallback
+        )
         return out
 
 
@@ -226,6 +253,8 @@ def restricted_value(
     ours = np.asarray(ours, dtype=np.float64)
     lock = np.asarray(lock, dtype=np.float64)
     c = np.asarray(conf, dtype=np.float64).reshape(tree.n_infosets)
+    if np.any(~np.isfinite(c)) or np.any(c < 0.0) or np.any(c > 1.0):
+        raise ValueError("conf entries must lie in [0, 1]")
     sigma = np.zeros((tree.n_infosets, N_ACTIONS))
     sigma[tree.infoset_rows[seat]] = ours[tree.infoset_rows[seat]]
     rho = tree.realization(sigma)
@@ -262,6 +291,55 @@ def restricted_value(
 
 def rnr_objective(game: Game, seat: int, ours: np.ndarray, lock: np.ndarray, p: float) -> float:
     """``p * EV(ours, lock) + (1 - p) * worst-case EV(ours)`` for ``seat``."""
+    if not 0.0 <= p <= 1.0:
+        raise ValueError("p must lie in [0, 1]")
     tree = compile_tree(game)
     worst = restricted_value(game, seat, ours, lock, np.zeros(tree.n_infosets))
     return p * ev_dense(game, seat, ours, lock) + (1.0 - p) * worst
+
+
+def duality_gap(
+    game: Game,
+    seat: int,
+    ours: np.ndarray,
+    adversary: np.ndarray,
+    lock: np.ndarray,
+    conf: np.ndarray | None = None,
+    rnr_p: float | None = None,
+) -> float:
+    """Upper bound on how far ``ours`` is from optimal in its restricted game (>= 0 up to rounding).
+
+    ``adversary`` is any admissible opponent: under a node lock an effective strategy of the
+    form ``c * lock + (1 - c) * tau`` (``LockedCFR.adversary`` is one), under RNR a free ``tau``.
+    The game value lies between ``objective(ours)`` and our best-response value against the
+    adversary (against the per-hand mixture of ``lock`` and ``tau`` under RNR).
+    """
+    tree = compile_tree(game)
+    opp = 1 - seat
+    if (conf is None) == (rnr_p is None):
+        raise ValueError("give exactly one of conf and rnr_p")
+    if conf is not None:
+        lower = restricted_value(game, seat, ours, lock, conf)
+        target = np.asarray(adversary, dtype=np.float64)
+    else:
+        lower = rnr_objective(game, seat, ours, lock, float(rnr_p))
+        target = _mix_two(tree, np.asarray(lock, dtype=np.float64), adversary, float(rnr_p), opp)
+    sigma = target.copy()
+    rho = tree.realization(sigma)
+    cf = tree.reach_chance * tree.reach(rho, opp)
+    u, _ = tree.best_response_pass(sigma, seat, cf)
+    upper = float(u[tree.root]) * (1.0 if seat == 0 else -1.0)
+    return upper - lower
+
+
+def _mix_two(tree: CompiledTree, a: np.ndarray, b: np.ndarray, w_a: float, seat: int) -> np.ndarray:
+    """``seat``'s rows of the behavioural strategy playing ``a`` w.p. ``w_a`` per hand, else ``b``."""
+    ra, rb = tree.realization(a), tree.realization(b)
+    rows = tree.infoset_rows[seat]
+    par = tree.infoset_parent_seq[rows]
+    wa, wb = w_a * ra[par], (1.0 - w_a) * rb[par]
+    den = wa + wb
+    out = np.zeros_like(a)
+    mixed = (wa[:, None] * a[rows] + wb[:, None] * b[rows]) / np.where(den > 0, den, 1.0)[:, None]
+    out[rows] = np.where((den > 0)[:, None], mixed, w_a * a[rows] + (1.0 - w_a) * b[rows])
+    return out

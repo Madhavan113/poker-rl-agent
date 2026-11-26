@@ -7,6 +7,7 @@ from exsolver.solvers import (
     LockedCFR,
     best_response,
     best_response_value,
+    duality_gap,
     ev_dense,
     restricted_value,
     rnr_objective,
@@ -198,3 +199,76 @@ def test_input_validation(kuhn):
         solver.solve(bad, 10, rnr_p=0.5)
     with pytest.raises(ValueError):
         LockedCFR(kuhn, 2, 1)
+
+
+@pytest.mark.parametrize(
+    ("game", "iterations", "tol"),
+    [(KuhnPoker(), 3000, 2e-4), (LeducPoker(), 500, 2e-3)],
+    ids=["kuhn", "leduc"],
+)
+def test_duality_gap_certifies_solution(game, iterations, tol):
+    """Lower bound = objective of our strategy, upper bound = our BR to the adversary's average."""
+    tree = compile_tree(game)
+    rng = np.random.default_rng(30)
+    locks = _random_locks(game, 2, seed=31, concentration=0.5)
+    conf = rng.uniform(size=(2, tree.n_infosets))
+    conf[0, tree.infoset_rows[0][::2]] = 1.0
+    conf[1, tree.infoset_rows[1][::3]] = 0.0
+    for seat in (0, 1):
+        s = LockedCFR(game, seat, 2)
+        ours = s.solve(locks, iterations, conf=conf)
+        for b in range(2):
+            gap = duality_gap(game, seat, ours[b], s.adversary[b], locks[b], conf=conf[b])
+            assert -1e-9 <= gap < tol
+        s = LockedCFR(game, seat, 2)
+        ours = s.solve(locks, iterations, rnr_p=0.6)
+        for b in range(2):
+            gap = duality_gap(game, seat, ours[b], s.adversary[b], locks[b], rnr_p=0.6)
+            assert -1e-9 <= gap < tol
+        # a non-optimal strategy (uniform) has a large certified gap
+        uni = np.broadcast_to(ours[0], ours[0].shape).copy()
+        uni[tree.infoset_rows[seat]] = tree.infoset_legal[
+            tree.infoset_rows[seat]
+        ] / tree.infoset_legal[tree.infoset_rows[seat]].sum(1, keepdims=True)
+        assert duality_gap(game, seat, uni, s.adversary[0], locks[0], rnr_p=0.6) > 10 * tol
+
+
+def test_warm_start_after_lock_and_confidence_change():
+    """Warm-starting after the lock and the confidences change still converges.
+
+    It is not guaranteed to beat a cold start of the same length (regrets from the old game are
+    stale; measured 2.6e-3 vs 2.2e-3 here), which is why E5 re-solves cold.
+    """
+    game = LeducPoker()
+    tree = compile_tree(game)
+    rng = np.random.default_rng(40)
+    locks = _random_locks(game, 2, seed=41, concentration=0.5)
+    hard = (rng.uniform(size=(2, tree.n_infosets)) < 0.5).astype(float)
+    new_locks = 0.5 * locks + 0.5 * _random_locks(game, 2, seed=42, concentration=0.5)
+    soft = rng.uniform(size=(2, tree.n_infosets))
+    s = LockedCFR(game, 0, 2)
+    s.solve(locks, 500, conf=hard)
+    warm = s.solve(new_locks, 200, conf=soft)
+    warm_adv = s.adversary.copy()
+    c = LockedCFR(game, 0, 2)
+    cold = c.solve(new_locks, 200, conf=soft)
+    for b in range(2):
+        g_warm = duality_gap(game, 0, warm[b], warm_adv[b], new_locks[b], conf=soft[b])
+        g_cold = duality_gap(game, 0, cold[b], c.adversary[b], new_locks[b], conf=soft[b])
+        assert g_warm < 5e-3 and g_cold < 5e-3
+    # switching game type resets the adversary instead of reusing incommensurate regrets
+    s.solve(new_locks, 200, rnr_p=0.5)
+    assert s.adversary.shape == locks.shape
+
+
+def test_evaluators_reject_bad_inputs(kuhn):
+    tree = compile_tree(kuhn)
+    locks = _random_locks(kuhn, 2, seed=0)
+    with pytest.raises(ValueError):
+        restricted_value(kuhn, 0, locks[0], locks[1], np.full(tree.n_infosets, 1.5))
+    with pytest.raises(ValueError):
+        restricted_value(kuhn, 0, locks[0], locks[1], np.full(tree.n_infosets, np.nan))
+    with pytest.raises(ValueError):
+        rnr_objective(kuhn, 0, locks[0], locks[1], 1.2)
+    with pytest.raises(ValueError):
+        duality_gap(kuhn, 0, locks[0], locks[1], locks[1])

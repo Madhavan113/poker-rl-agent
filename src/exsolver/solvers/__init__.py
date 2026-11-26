@@ -10,6 +10,7 @@ from exsolver.solvers.best_response import (
 from exsolver.solvers.cfr import CFRPlus, cfr_plus
 from exsolver.solvers.constrained import (
     LockedCFR,
+    duality_gap,
     ev_dense,
     restricted_value,
     rnr_objective,
@@ -23,6 +24,7 @@ __all__ = [
     "best_response",
     "best_response_value",
     "cfr_plus",
+    "duality_gap",
     "ev_dense",
     "expected_value",
     "exploitability",

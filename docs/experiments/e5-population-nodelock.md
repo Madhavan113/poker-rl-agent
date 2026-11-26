@@ -32,7 +32,8 @@ fixed strategy; EV exact against the true opponent. Gain over Nash (chips/hand) 
 early EV over a prior-free fit; partial node locks are near-worthless at small samples; RNR mixing is
 the better robustness knob. Against static opponents the full lock is simply best. This experiment
 asks whether the ranking holds in Leduc and whether it flips against adaptive opponents. The script
-is not part of the repository; the E5 runner supersedes it.
+is not part of the repository, so these numbers are indicative only and are not carried into the
+results; the E5 runner supersedes it.
 
 ## Restricted games (implemented in `exsolver.solvers.constrained`)
 
@@ -49,7 +50,9 @@ For our seat `s` and an opponent model `θ̂` (a behavioural strategy for the ot
 Both are zero-sum games over convex strategy sets. Solver: batched CFR+ (alternating updates,
 regret matching+ on `τ` and on our strategy, linear averaging of ours), warm-started across
 re-solves (regrets persist, the average restarts). `restricted_value` and `rnr_objective` evaluate
-the two objectives exactly for any strategy and are the solver's correctness checks.
+the two objectives exactly for any strategy; `duality_gap` bounds a solution's distance from the
+restricted game's value using the adversary's average strategy (lower bound: our objective; upper
+bound: our best response to the adversary).
 
 ## Population (Leduc, `exsolver.population.leduc_prior`)
 
@@ -91,7 +94,9 @@ Before every later block the agent estimates `θ̂` from all hands so far with p
   30 iterations warm-started from the previous block's estimate.
 
 Methods: `nash`, `br`, `hard` (m = 10), `soft` (k = 10), `rnr_lo` (p = 0.5), `rnr_hi` (p = 0.8).
-Re-solves: 500 CFR+ iterations for the first, 200 warm-started iterations after.
+Re-solves: 300 CFR+ iterations, cold (a warm start after a large lock change can be slightly
+worse than a cold one). Every re-solve's certified duality gap (`duality_gap`) is recorded and its
+mean and maximum are reported, so solver error is bounded for every number.
 
 ## Metrics (all exact)
 
