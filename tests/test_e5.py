@@ -87,6 +87,8 @@ def test_play_block_pairs_deals_across_strategies():
     assert diff_actions > 10  # the agents really played differently
     other = play_block(game, a, opp, seed=0, b=4, k=5, n=40)
     assert [r.my_cards for r in other] != [r.my_cards for r in ra]
+    next_block = play_block(game, a, opp, seed=0, b=3, k=6, n=40)
+    assert [r.my_cards for r in next_block] != [r.my_cards for r in ra]
 
 
 def test_leduc_prior_profiles(leduc_prior):
@@ -225,6 +227,10 @@ def test_e5_smoke_run(tmp_path):
     re = main(["--game", "kuhn", "--smoke", "--out", str(tmp_path), "--reaggregate"])
     assert [r["gain_vs_nash"] for r in re["rows"]] == [r["gain_vs_nash"] for r in agg["rows"]]
     assert "re-aggregated" in (tmp_path / "README.md").read_text()
+    # ... and refuses a config that did not produce blocks.npz
+    for bad in (["--seed", "7"], ["--n-blocks", "2"], ["--block", "4"]):
+        with pytest.raises(SystemExit):
+            main(["--game", "kuhn", "--smoke", "--out", str(tmp_path), "--reaggregate", *bad])
     # block 0 is the equilibrium for every config: identical EV against the same opponents
     # (exact, so this checks the opponent sets, not the deals; play_block's test checks those)
     first = {

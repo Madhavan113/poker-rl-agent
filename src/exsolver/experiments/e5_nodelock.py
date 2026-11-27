@@ -287,8 +287,9 @@ def play_block(game: Game, ours: Any, opp: Any, seed: int, b: int, k: int, n: in
 
     Deals and board cards come from ``default_rng([seed, b, k, h])`` and each side's action
     draws from their own streams, so every config faces the same cards in the same hands.
-    (Known, harmless: numpy drops trailing zeros, so the stream for ``b = 1, k = h = 0``
-    equals the population seed ``[seed, 1]``; E5 results were produced with this seeding.)
+    (Known, harmless: numpy drops trailing zeros, so the streams for ``b = 1, k = h = 0`` and
+    ``b = 2, k = h = 0`` equal the population seed ``[seed, 1]`` and the fresh-set seed
+    ``[seed, 2]``; E5 results were produced with this seeding. Tag the stream in the next run.)
     """
     out = []
     for h in range(n):
@@ -676,6 +677,47 @@ def load_blocks(path: Path) -> list[dict[str, Any]]:
     return out
 
 
+_NOT_RESULT_FIELDS = ("out", "workers", "extra")
+
+
+def _opponents_fingerprint(world: World) -> str:
+    h = hashlib.sha256()
+    for name in sorted(world.opponents):
+        h.update(name.encode())
+        h.update(np.ascontiguousarray(world.opponents[name]).tobytes())
+    return h.hexdigest()[:16]
+
+
+def _checked_blocks(cfg: E5Config, world: World) -> tuple[list[dict[str, Any]], str]:
+    """Load ``blocks.npz`` and refuse unless it was produced by this config and these opponents.
+
+    The saved config (in ``blocks.npz``, or for runs that predate that, ``summary.json``) must
+    equal the current one in every result-changing field; the opponents rebuilt from the
+    current code must match the saved fingerprint when there is one. Returns the results and
+    the provenance (git and code) of the run that produced them.
+    """
+    path = cfg.out / "blocks.npz"
+    with np.load(path) as d:
+        saved_cfg = json.loads(str(d["config"])) if "config" in d.files else None
+        fingerprint = str(d["opponents"]) if "opponents" in d.files else None
+        provenance = str(d["provenance"]) if "provenance" in d.files else None
+    if saved_cfg is None:  # legacy run: its config lives in summary.json
+        saved_cfg = json.loads((cfg.out / "summary.json").read_text())["config"]
+        provenance = "the run entry above in this README (blocks.npz predates provenance)"
+    current = _jsonable(asdict(cfg))
+    differ = sorted(
+        k for k in current if k not in _NOT_RESULT_FIELDS and current[k] != saved_cfg.get(k)
+    )
+    if differ:
+        raise SystemExit(f"blocks.npz was produced with a different config: {', '.join(differ)}")
+    if fingerprint is not None and fingerprint != _opponents_fingerprint(world):
+        raise SystemExit("blocks.npz was produced against different opponents")
+    results = load_blocks(path)
+    if sorted(r["key"] for r in results) != sorted(j.key for j in jobs_for(cfg)):
+        raise SystemExit("blocks.npz does not hold exactly this config's jobs")
+    return results, str(provenance)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--game", choices=("kuhn", "leduc"), default="leduc")
@@ -730,13 +772,13 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     cfg.out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     world = build_world(cfg)
+    provenance = f"git {_git_state()}, code {code_hash()}"
     if args.reaggregate:
-        results = load_blocks(cfg.out / "blocks.npz")
-        missing = {j.key for j in jobs_for(cfg)} - {r["key"] for r in results}
-        if missing:
-            raise SystemExit(f"blocks.npz lacks {len(missing)} jobs of this config")
+        results, provenance = _checked_blocks(cfg, world)
         previous = json.loads((cfg.out / "summary.json").read_text())
         agg = aggregate(cfg, world, results)
+        if previous.get("static_oracle_ev") != json.loads(json.dumps(agg["static_oracle_ev"])):
+            raise SystemExit("rebuilt opponents differ from the run's (static oracle EV changed)")
         agg["wall_seconds"] = previous.get("wall_seconds")
     else:
         results = run_all(cfg, world, log=lambda m: print(m, file=sys.stderr, flush=True))
@@ -751,6 +793,9 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
             ev=np.stack([r["ev"] for r in results]),
             expl=np.stack([r["expl"] for r in results]),
             gap=np.stack([r["gap"] for r in results]),
+            config=json.dumps(_jsonable(asdict(cfg)), sort_keys=True),
+            opponents=_opponents_fingerprint(world),
+            provenance=provenance,
         )
     figures = plot(agg, cfg.out)
     cmd = "uv run python -m exsolver.experiments.e5_nodelock " + " ".join(
@@ -760,9 +805,13 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         f.write(
             f"\n## run — {datetime.now(UTC).isoformat(timespec='seconds')}\n\n```\n{cmd}\n```\n\n"
             f"```json\n{json.dumps(_jsonable(asdict(cfg)), indent=1)}\n```\n\n"
-            f"{'re-aggregated from blocks.npz' if args.reaggregate else 'wall time'} "
-            f"{agg['wall_seconds'] or 0:.0f} s, git {_git_state()}, code {code_hash()}, "
-            f"figures: {', '.join(p.name for p in figures)}\n"
+            + (
+                f"re-aggregated from blocks.npz (blocks from: {provenance}) with git {_git_state()}, "
+                f"code {code_hash()}, "
+                if args.reaggregate
+                else f"wall time {agg['wall_seconds']:.0f} s, {provenance}, "
+            )
+            + f"figures: {', '.join(p.name for p in figures)}\n"
         )
     return agg
 
