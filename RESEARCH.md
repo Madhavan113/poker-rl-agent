@@ -292,8 +292,9 @@ once sessions exceed a few thousand tokens; heads for action, value, and opponen
   population posterior captures 92% of the oracle's edge against static opponents (+0.49 chips/hand over Nash). Against
   an opponent that moves 10% toward a best response every 32 hands it loses 0.40/hand to Nash (bayes, γ = 1). RNR(0.5)
   keeps a non-negative session gain everywhere (+0.19 static, +0.07 at that adaptation rate), drifting at most 0.038
-  below Nash late against fast adapters. Soft node locks match its gain per unit of exploitability at a tenth of the
-  scale; hard locks are dominated. Only ~2.4% of opponent infosets see 10 observations in 480 hands, which is why
+  below Nash late against fast adapters. With the population posterior, soft node locks match its gain per unit of
+  exploitability (2.97 vs 2.82; with em RNR(0.5) leads, 3.24 vs 2.39) at about a sixth of the scale; hard locks are
+  dominated. Only ~2.4% of opponent infosets see 10 observations in 480 hands, which is why
   per-node locks earn little. The open problem is choosing the trust level online.
 
 ## 11. Decision log
