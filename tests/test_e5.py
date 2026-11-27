@@ -155,6 +155,9 @@ def test_e5_smoke_run(tmp_path):
         assert 0.0 <= r["solver_gap_max"] < 0.1  # certified solver error, smoke-size solves
         if r["method"] in ("nash", "br"):
             assert r["solver_gap_max"] == 0.0
+    # a second run with the same config resumes from the cached jobs and reproduces the summary
+    again = main(["--game", "kuhn", "--smoke", "--out", str(tmp_path)])
+    assert [r["ev"] for r in again["rows"]] == [r["ev"] for r in agg["rows"]]
     # block 0 is the equilibrium for every config: identical EV against the same opponents
     first = {
         r["set_name"] + str(r["eta"]): r["ev_by_block"][0] for r in rows if r["method"] == "nash"

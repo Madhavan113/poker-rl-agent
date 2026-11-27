@@ -20,6 +20,7 @@ per-(opponent, block, hand) seeds, so every config faces the same cards.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -27,7 +28,7 @@ import shlex
 import sys
 import time
 from collections.abc import Sequence
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -344,20 +345,68 @@ def _run_in_worker(job: Job) -> dict[str, Any]:
     return run_job(job, _CFG, _WORLD)
 
 
+def _config_hash(cfg: E5Config) -> str:
+    """Hash of everything that changes a job's result (not out/workers/job lists)."""
+    d = asdict(cfg)
+    for k in ("out", "workers", "sets", "etas", "inferences", "gammas", "methods", "extra"):
+        d.pop(k)
+    return hashlib.sha256(json.dumps(_jsonable(d), sort_keys=True).encode()).hexdigest()[:12]
+
+
+def _job_path(cfg: E5Config, job: Job) -> Path:
+    name = hashlib.sha256(job.key.encode()).hexdigest()[:16]
+    return cfg.out / "jobs" / _config_hash(cfg) / f"{name}.npz"
+
+
+def _save_job(path: Path, r: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp.npz")
+    np.savez(tmp, key=r["key"], job=json.dumps(r["job"]), ev=r["ev"], expl=r["expl"], gap=r["gap"])
+    tmp.replace(path)
+
+
+def _load_job(path: Path) -> dict[str, Any]:
+    with np.load(path) as d:
+        return {
+            "key": str(d["key"]),
+            "job": json.loads(str(d["job"])),
+            "ev": d["ev"],
+            "expl": d["expl"],
+            "gap": d["gap"],
+        }
+
+
 def run_all(cfg: E5Config, world: World, log=print) -> list[dict[str, Any]]:
+    """Run every job, caching each result under ``<out>/jobs/<config hash>/`` and resuming.
+
+    A re-run with the same config reuses finished jobs, so an interrupted run loses only the
+    jobs in flight. Results are returned in ``jobs_for`` order.
+    """
     jobs = jobs_for(cfg)
-    results: list[dict[str, Any]] = []
+    done: dict[str, dict[str, Any]] = {}
+    for j in jobs:
+        path = _job_path(cfg, j)
+        if path.exists():
+            done[j.key] = _load_job(path)
+    if done:
+        log(f"resuming: {len(done)}/{len(jobs)} jobs cached")
+    todo = [j for j in jobs if j.key not in done]
     t0 = time.time()
+
+    def finish(j: Job, r: dict[str, Any]) -> None:
+        _save_job(_job_path(cfg, j), r)
+        done[j.key] = r
+        log(f"[{time.time() - t0:7.0f}s] {len(done)}/{len(jobs)} {j.key}")
+
     if cfg.workers <= 1:
-        for j in jobs:
-            results.append(run_job(j, cfg, world))
-            log(f"[{time.time() - t0:7.0f}s] {len(results)}/{len(jobs)} {j.key}")
-        return results
-    with ProcessPoolExecutor(cfg.workers, initializer=_init_worker, initargs=(cfg,)) as ex:
-        for r in ex.map(_run_in_worker, jobs):
-            results.append(r)
-            log(f"[{time.time() - t0:7.0f}s] {len(results)}/{len(jobs)} {r['key']}")
-    return results
+        for j in todo:
+            finish(j, run_job(j, cfg, world))
+    elif todo:
+        with ProcessPoolExecutor(cfg.workers, initializer=_init_worker, initargs=(cfg,)) as ex:
+            futures = {ex.submit(_run_in_worker, j): j for j in todo}
+            for fut in as_completed(futures):
+                finish(futures[fut], fut.result())
+    return [done[j.key] for j in jobs]
 
 
 # --------------------------------------------------------------------- aggregation

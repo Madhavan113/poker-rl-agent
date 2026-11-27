@@ -250,15 +250,48 @@ def test_warm_start_after_lock_and_confidence_change():
     s.solve(locks, 500, conf=hard)
     warm = s.solve(new_locks, 200, conf=soft)
     warm_adv = s.adversary.copy()
+    our_regrets, our_sigma = s.regrets.copy(), s.sigma.copy()
     c = LockedCFR(game, 0, 2)
     cold = c.solve(new_locks, 200, conf=soft)
     for b in range(2):
         g_warm = duality_gap(game, 0, warm[b], warm_adv[b], new_locks[b], conf=soft[b])
         g_cold = duality_gap(game, 0, cold[b], c.adversary[b], new_locks[b], conf=soft[b])
         assert g_warm < 5e-3 and g_cold < 5e-3
-    # switching game type resets the adversary instead of reusing incommensurate regrets
-    s.solve(new_locks, 200, rnr_p=0.5)
-    assert s.adversary.shape == locks.shape
+    # switching game type resets the adversary: same result as a solver that keeps only our
+    # seat's regrets and starts the adversary afresh
+    switched = s.solve(new_locks, 50, rnr_p=0.5)
+    fresh = LockedCFR(game, 0, 2)
+    ours_rows = tree.infoset_rows[0]
+    fresh.regrets[:, ours_rows] = our_regrets[:, ours_rows]
+    fresh.sigma[:, ours_rows] = our_sigma[:, ours_rows]
+    np.testing.assert_allclose(fresh.solve(new_locks, 50, rnr_p=0.5), switched, atol=1e-12)
+
+
+def test_duality_gap_brackets_kuhn_value(kuhn):
+    """With no lock (conf = 0 or p = 0) the restricted game is Kuhn: lower <= -1/18 <= upper."""
+    tree = compile_tree(kuhn)
+    locks = _random_locks(kuhn, 1, seed=50)
+    zero = np.zeros((1, tree.n_infosets))
+    for kw in ({"conf": zero}, {"rnr_p": 0.0}):
+        s = LockedCFR(kuhn, 0, 1)
+        ours = s.solve(locks, 200, **kw)
+        one = {k: (v[0] if isinstance(v, np.ndarray) else v) for k, v in kw.items()}
+        gap = duality_gap(kuhn, 0, ours[0], s.adversary[0], locks[0], **one)
+        lower = restricted_value(kuhn, 0, ours[0], locks[0], np.zeros(tree.n_infosets))
+        assert lower <= KUHN_VALUE + 1e-12 <= lower + gap + 2e-12
+
+
+def test_duality_gap_rejects_inadmissible_adversary(kuhn):
+    tree = compile_tree(kuhn)
+    locks = _random_locks(kuhn, 1, seed=51)
+    ones = np.ones(tree.n_infosets)
+    br = LockedCFR(kuhn, 0, 1).solve(locks, 300, conf=ones[None])
+    nash_tau = LockedCFR(kuhn, 0, 1)
+    nash_tau.solve(locks, 300, conf=np.zeros((1, tree.n_infosets)))
+    with pytest.raises(ValueError):  # a free tau is not admissible when every infoset is locked
+        duality_gap(kuhn, 0, br[0], nash_tau.adversary[0], locks[0], conf=ones)
+    with pytest.raises(ValueError):  # not a strategy at all
+        duality_gap(kuhn, 0, br[0], np.zeros_like(locks[0]), locks[0], rnr_p=0.5)
 
 
 def test_evaluators_reject_bad_inputs(kuhn):
