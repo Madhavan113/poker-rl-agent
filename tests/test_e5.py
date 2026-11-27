@@ -30,6 +30,65 @@ def test_strength_bucket():
     assert strength_bucket("0:Qh|cc/Ks|b") == WEAK
 
 
+def test_leduc_archetype_table_matches_spec():
+    """Pins ``default_leduc_archetypes`` to the table in the E5 spec §Population."""
+    from exsolver.population.leduc_prior import default_leduc_archetypes
+
+    z = (0.0, 0.0, 0.0)
+    spec = {
+        "equilibrium": ((z, z, z), (z, z, z)),
+        "maniac": (
+            ((0, 0, 1.5), (0, 0, 1.5), (0, 0, 1.0)),
+            ((-1.0, 0, 1.0), (-1.0, 0, 1.0), (-1.0, 0, 1.0)),
+        ),
+        "station": (
+            ((0, 0.5, 0), (0, 0.5, 0), (0, 0.5, 0)),
+            ((-2.0, 1.5, -0.5), (-2.0, 1.5, -0.5), (-1.0, 1.0, -0.5)),
+        ),
+        "rock": (
+            ((0, 0, -1.5), (0, 0, -0.5), z),
+            ((1.5, 0, -1.5), (1.0, 0, -0.5), z),
+        ),
+        "passive": (
+            ((0, 0, -2.0), (0, 0, -2.0), (0, 0, -1.5)),
+            ((0, 0.5, -2.0), (0, 0.5, -2.0), (0, 0.5, -1.5)),
+        ),
+    }
+    archs = default_leduc_archetypes()
+    assert [a.name for a in archs] == list(spec)
+    for a in archs:
+        assert a.weight == 0.2
+        np.testing.assert_array_equal(
+            np.array(a.bias, dtype=float), np.array(spec[a.name], dtype=float)
+        )
+
+
+def test_play_block_pairs_deals_across_strategies():
+    """Two different agents in the same (opponent, block) see the same private cards and boards."""
+    from exsolver.experiments.e5_nodelock import play_block
+
+    game = LeducPoker()
+    tree = compile_tree(game)
+    rng = np.random.default_rng(12)
+    a, b, opp = (
+        tree.strategy_from_dense(strategy_to_array(game, random_strategy(game, rng)))
+        for _ in range(3)
+    )
+    ra = play_block(game, a, opp, seed=0, b=3, k=5, n=40)
+    rb = play_block(game, b, opp, seed=0, b=3, k=5, n=40)
+    diff_actions = 0
+    for x, y in zip(ra, rb, strict=True):
+        assert x.seat == y.seat and x.my_cards == y.my_cards
+        bx = [e for e in x.events if e[0] == "board"]
+        by = [e for e in y.events if e[0] == "board"]
+        if bx and by:
+            assert bx == by
+        diff_actions += x.events != y.events
+    assert diff_actions > 10  # the agents really played differently
+    other = play_block(game, a, opp, seed=0, b=4, k=5, n=40)
+    assert [r.my_cards for r in other] != [r.my_cards for r in ra]
+
+
 def test_leduc_prior_profiles(leduc_prior):
     tree = leduc_prior.tree
     legal = tree.infoset_legal
@@ -158,7 +217,16 @@ def test_e5_smoke_run(tmp_path):
     # a second run with the same config resumes from the cached jobs and reproduces the summary
     again = main(["--game", "kuhn", "--smoke", "--out", str(tmp_path)])
     assert [r["ev"] for r in again["rows"]] == [r["ev"] for r in agg["rows"]]
+    from exsolver.experiments.e5_nodelock import code_hash
+
+    cached = list((tmp_path / "jobs").iterdir())
+    assert len(cached) == 1 and cached[0].name.endswith("-" + code_hash())
+    # re-aggregating from blocks.npz reproduces every number without running a job
+    re = main(["--game", "kuhn", "--smoke", "--out", str(tmp_path), "--reaggregate"])
+    assert [r["gain_vs_nash"] for r in re["rows"]] == [r["gain_vs_nash"] for r in agg["rows"]]
+    assert "re-aggregated" in (tmp_path / "README.md").read_text()
     # block 0 is the equilibrium for every config: identical EV against the same opponents
+    # (exact, so this checks the opponent sets, not the deals; play_block's test checks those)
     first = {
         r["set_name"] + str(r["eta"]): r["ev_by_block"][0] for r in rows if r["method"] == "nash"
     }

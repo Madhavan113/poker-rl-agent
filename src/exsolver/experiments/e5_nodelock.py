@@ -282,6 +282,29 @@ def _exact_br(game: Game, seat: int, opp: np.ndarray) -> np.ndarray:
     return out
 
 
+def play_block(game: Game, ours: Any, opp: Any, seed: int, b: int, k: int, n: int) -> list[Any]:
+    """The ``n`` hands of block ``k`` against opponent ``b``, seats alternating from 0.
+
+    Deals and board cards come from ``default_rng([seed, b, k, h])`` and each side's action
+    draws from their own streams, so every config faces the same cards in the same hands.
+    (Known, harmless: numpy drops trailing zeros, so the stream for ``b = 1, k = h = 0``
+    equals the population seed ``[seed, 1]``; E5 results were produced with this seeding.)
+    """
+    out = []
+    for h in range(n):
+        rec, _ = play_hand(
+            game,
+            h % 2,
+            ours,
+            opp,
+            np.random.default_rng([seed, b, k, h]),
+            agent_rng=np.random.default_rng([seed, b, k, h, 1]),
+            opp_rng=np.random.default_rng([seed, b, k, h, 2]),
+        )
+        out.append(rec)
+    return out
+
+
 def run_job(job: Job, cfg: E5Config, world: World) -> dict[str, Any]:
     game = world.game
     tree = compile_tree(game)
@@ -313,17 +336,7 @@ def run_job(job: Job, cfg: E5Config, world: World) -> dict[str, Any]:
             for b in range(bsz):
                 ours_tab = tree.strategy_from_dense(ours[b])
                 opp_tab = tree.strategy_from_dense(theta[b])
-                for h in range(cfg.block):
-                    rng = np.random.default_rng([cfg.seed, b, k, h])
-                    rec, _ = play_hand(
-                        game,
-                        h % 2,
-                        ours_tab,
-                        opp_tab,
-                        rng,
-                        agent_rng=np.random.default_rng([cfg.seed, b, k, h, 1]),
-                        opp_rng=np.random.default_rng([cfg.seed, b, k, h, 2]),
-                    )
+                for rec in play_block(game, ours_tab, opp_tab, cfg.seed, b, k, cfg.block):
                     est.add(b, rec, k)
         theta = adapt(game, theta, ours, job.eta)
     return {"key": job.key, "job": asdict(job), "ev": ev, "expl": expl, "gap": gap}
@@ -353,9 +366,25 @@ def _config_hash(cfg: E5Config) -> str:
     return hashlib.sha256(json.dumps(_jsonable(d), sort_keys=True).encode()).hexdigest()[:12]
 
 
+@lru_cache(maxsize=1)
+def code_hash() -> str:
+    """Hash of every source file of the ``exsolver`` package (paths and contents)."""
+    import exsolver
+
+    root = Path(exsolver.__file__).resolve().parent
+    h = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        h.update(str(path.relative_to(root)).encode())
+        h.update(b"\0")
+        h.update(path.read_bytes())
+    return h.hexdigest()[:12]
+
+
 def _job_path(cfg: E5Config, job: Job) -> Path:
+    """Cache path: keyed by the result-changing config *and* the code, so a fix never reuses
+    a result computed by older code."""
     name = hashlib.sha256(job.key.encode()).hexdigest()[:16]
-    return cfg.out / "jobs" / _config_hash(cfg) / f"{name}.npz"
+    return cfg.out / "jobs" / f"{_config_hash(cfg)}-{code_hash()}" / f"{name}.npz"
 
 
 def _save_job(path: Path, r: dict[str, Any]) -> None:
@@ -377,7 +406,7 @@ def _load_job(path: Path) -> dict[str, Any]:
 
 
 def run_all(cfg: E5Config, world: World, log=print) -> list[dict[str, Any]]:
-    """Run every job, caching each result under ``<out>/jobs/<config hash>/`` and resuming.
+    """Run every job, caching each result under ``<out>/jobs/<config>-<code hash>/``; resumes.
 
     A re-run with the same config reuses finished jobs, so an interrupted run loses only the
     jobs in flight. Results are returned in ``jobs_for`` order.
@@ -436,8 +465,8 @@ def aggregate(cfg: E5Config, world: World, results: list[dict[str, Any]]) -> dic
             "ev_by_block_se": (ev.std(0, ddof=1) / math.sqrt(ev.shape[0])).tolist()
             if ev.shape[0] > 1
             else [0.0] * cfg.n_blocks,
-            "by_archetype": {
-                name: float((ev - nash)[world.opp_archetypes[j["set_name"]] == a].mean())
+            "by_archetype": {  # session gain over Nash: [mean, s.e.] over the archetype's opponents
+                name: _mse((ev - nash)[world.opp_archetypes[j["set_name"]] == a].mean(1))
                 for a, name in enumerate(world.archetype_names)
                 if np.any(world.opp_archetypes[j["set_name"]] == a)
             },
@@ -545,8 +574,7 @@ def plot(agg: dict[str, Any], out: Path) -> list[Path]:
                         ax.plot(
                             x, y, color=c, lw=LINE_W, ls="--" if is_nash else "-", label=r["method"]
                         )
-                        if not is_nash:
-                            ax.fill_between(x, y - se, y + se, color=c, alpha=BAND_ALPHA, lw=0)
+                        ax.fill_between(x, y - se, y + se, color=c, alpha=BAND_ALPHA, lw=0)
                     ax.set_title(f"η = {eta}, γ = {g}", color=INK, fontsize=10)
                     ax.grid(color=GRID, lw=0.6)
                     ax.tick_params(colors=INK_2, labelsize=8)
@@ -579,14 +607,18 @@ def plot(agg: dict[str, Any], out: Path) -> list[Path]:
         for r in agg["rows"]:
             if r["set_name"] != s or r["eta"] != eta or r["method"] == "nash" or r["gamma"] != g:
                 continue
-            ax.scatter(
+            ax.errorbar(
                 r["exploitability"][0],
                 r["gain_vs_nash"][0],
-                s=40,
+                xerr=r["exploitability"][1],
+                yerr=r["gain_vs_nash"][1],
+                fmt=markers.get(r["inference"], "o"),
+                ms=6,
                 color=colours[r["method"]],
-                marker=markers.get(r["inference"], "o"),
-                edgecolor="white",
-                lw=1.0,
+                mec="white",
+                mew=1.0,
+                elinewidth=1.0,
+                capsize=0,
                 label=f"{r['method']} ({r['inference']})",
                 zorder=3,
             )
@@ -599,7 +631,12 @@ def plot(agg: dict[str, Any], out: Path) -> list[Path]:
             sp.set_color(GRID)
     axes[0][0].set_ylabel("EV gain over Nash (chips/hand)", color=INK_2, fontsize=9)
     axes[0][-1].legend(fontsize=7, frameon=False, labelcolor=INK_2, loc="best")
-    fig.suptitle(f"E5 {agg['game']}: gain vs exploitability ({s}, γ = {g})", color=INK, fontsize=11)
+    fig.suptitle(
+        f"E5 {agg['game']}: session gain vs exploitability ({s}, γ = {g}; ±1 s.e., "
+        f"{cfg['n_opp']} opponents)",
+        color=INK,
+        fontsize=11,
+    )
     fig.tight_layout()
     p = out / "frontier.png"
     fig.savefig(p, dpi=FIG_DPI)
@@ -609,6 +646,36 @@ def plot(agg: dict[str, Any], out: Path) -> list[Path]:
 
 
 # --------------------------------------------------------------------- CLI
+def job_from_key(key: str) -> Job:
+    """Inverse of ``Job.key``."""
+    set_name, eta, inference, gamma, method = key.split("|")
+    return Job(
+        set_name,
+        float(eta.removeprefix("eta=")),
+        inference,
+        float(gamma.removeprefix("gamma=")),
+        method,
+    )
+
+
+def load_blocks(path: Path) -> list[dict[str, Any]]:
+    """Per-job block arrays saved by a run (``blocks.npz``) in the ``run_job`` result format."""
+    with np.load(path) as d:
+        out = []
+        for i, key in enumerate(d["keys"]):
+            job = job_from_key(str(key))
+            out.append(
+                {
+                    "key": job.key,
+                    "job": asdict(job),
+                    "ev": d["ev"][i],
+                    "expl": d["expl"][i],
+                    "gap": d["gap"][i],
+                }
+            )
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--game", choices=("kuhn", "leduc"), default="leduc")
@@ -625,6 +692,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int)
     p.add_argument("--workers", type=int)
     p.add_argument("--smoke", action="store_true")
+    p.add_argument(
+        "--reaggregate",
+        action="store_true",
+        help="rebuild summary and figures from <out>/blocks.npz without re-running any job",
+    )
     return p
 
 
@@ -646,24 +718,40 @@ def config_from_args(args: argparse.Namespace) -> E5Config:
     return cfg
 
 
+def _git_state() -> str:
+    sha = os.popen("git rev-parse HEAD 2>/dev/null").read().strip() or "unknown"
+    dirty = os.popen("git status --porcelain --untracked-files=no 2>/dev/null").read().strip()
+    return f"{sha}{' (dirty)' if dirty else ''}"
+
+
 def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     args = build_parser().parse_args(argv)
     cfg = config_from_args(args)
     cfg.out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     world = build_world(cfg)
-    results = run_all(cfg, world, log=lambda m: print(m, file=sys.stderr, flush=True))
-    agg = aggregate(cfg, world, results)
-    agg["wall_seconds"] = time.time() - t0
+    if args.reaggregate:
+        results = load_blocks(cfg.out / "blocks.npz")
+        missing = {j.key for j in jobs_for(cfg)} - {r["key"] for r in results}
+        if missing:
+            raise SystemExit(f"blocks.npz lacks {len(missing)} jobs of this config")
+        previous = json.loads((cfg.out / "summary.json").read_text())
+        agg = aggregate(cfg, world, results)
+        agg["wall_seconds"] = previous.get("wall_seconds")
+    else:
+        results = run_all(cfg, world, log=lambda m: print(m, file=sys.stderr, flush=True))
+        agg = aggregate(cfg, world, results)
+        agg["wall_seconds"] = time.time() - t0
     (cfg.out / "summary.json").write_text(json.dumps(agg, indent=1))
     (cfg.out / "summary.md").write_text(summary_markdown(agg))
-    np.savez_compressed(
-        cfg.out / "blocks.npz",
-        keys=np.array([r["key"] for r in results]),
-        ev=np.stack([r["ev"] for r in results]),
-        expl=np.stack([r["expl"] for r in results]),
-        gap=np.stack([r["gap"] for r in results]),
-    )
+    if not args.reaggregate:
+        np.savez_compressed(
+            cfg.out / "blocks.npz",
+            keys=np.array([r["key"] for r in results]),
+            ev=np.stack([r["ev"] for r in results]),
+            expl=np.stack([r["expl"] for r in results]),
+            gap=np.stack([r["gap"] for r in results]),
+        )
     figures = plot(agg, cfg.out)
     cmd = "uv run python -m exsolver.experiments.e5_nodelock " + " ".join(
         shlex.quote(a) for a in (sys.argv[1:] if argv is None else list(argv))
@@ -672,7 +760,8 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         f.write(
             f"\n## run — {datetime.now(UTC).isoformat(timespec='seconds')}\n\n```\n{cmd}\n```\n\n"
             f"```json\n{json.dumps(_jsonable(asdict(cfg)), indent=1)}\n```\n\n"
-            f"wall time {agg['wall_seconds']:.0f} s, git {os.popen('git rev-parse HEAD').read().strip()}, "
+            f"{'re-aggregated from blocks.npz' if args.reaggregate else 'wall time'} "
+            f"{agg['wall_seconds'] or 0:.0f} s, git {_git_state()}, code {code_hash()}, "
             f"figures: {', '.join(p.name for p in figures)}\n"
         )
     return agg

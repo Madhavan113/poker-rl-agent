@@ -8,9 +8,9 @@ adapts:
   sum_t w_t log L(hand_t | theta_i)`` over a discrete population; the estimate is the
   sequence-form mixture of the population under that posterior (``StrategyMixer``). With all
   weights 1 this is ``ExactPosterior``.
-* **Prior-free MAP** (``em_fit``): a Dirichlet prior at every opponent infoset centred on a
-  reference profile (the equilibrium) with ``strength`` pseudo-observations, fitted by EM over
-  the opponent's hidden card when there was no showdown.
+* **Prior-free posterior mode** (``em_fit``): ``strength`` pseudo-observations of a reference
+  profile (the equilibrium) at every opponent infoset, fitted by EM over the opponent's hidden
+  card when there was no showdown.
 
 ``expected_visits`` gives the (weighted) number of times the opponent acted at each infoset
 under an estimate -- the ``n_I`` that sets the lock confidence.
@@ -115,7 +115,12 @@ def em_fit(
     init: np.ndarray | None = None,
     iterations: int = 30,
 ) -> np.ndarray:
-    """MAP profile ``[I, 3]`` under a Dirichlet(``strength * reference``) prior per infoset.
+    """Posterior mode ``[I, 3]`` with ``strength * reference`` pseudo-observations per infoset.
+
+    Each EM step sets ``theta = (expected counts + strength * reference) / total``: the MAP under
+    a Dirichlet(``strength * reference + 1``) prior (equivalently, add-``alpha`` smoothing). It
+    is used instead of the Dirichlet(``alpha``) MAP because that mode is undefined where
+    ``alpha < 1``, which the smoothed equilibrium has on most rows at strength 4.
 
     ``reference`` must be strictly positive on legal actions (smooth the equilibrium first).
     Rows the data never touch stay at ``reference``.
