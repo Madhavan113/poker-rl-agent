@@ -62,10 +62,20 @@ Perturbed CFR (RESEARCH.md §3.3). From the CFR+ equilibrium `s*` (2000 iteratio
     logit(a | I) = log s~(a | I) + β · b_arch(a, situation(I)) + ε(I, a),   ε ~ N(0, 0.15²),  β ~ U[0.5, 1.5]
 
 `situation` = (facing a bet?, hand-strength bucket); buckets: preflop J/Q/K = weak/mid/strong,
-postflop pair = strong, unpaired K = mid, else weak. Five archetypes at weight 0.2 each:
-equilibrium (no bias), maniac (raise +1.5/+1.0, fold −1.0 facing bets), station (call +1.5 and fold
-−2.0 facing bets with weak/mid hands), rock (fold +1.5/+1.0 facing bets with weak/mid, no bluff
-raises), passive (raise −2.0 everywhere). Population `M = 256` (seed `[seed, 1]`). Opponent sets:
+postflop pair = strong, unpaired K = mid, else weak. Five archetypes at weight 0.2 each. Their logit
+biases `b_arch` on (fold, call, raise), exactly as in `default_leduc_archetypes` (amended 2026-11-26
+to match the code the E5 run used; the first version of this section paraphrased it loosely; FOLD is
+illegal when not facing a bet):
+
+| archetype | not facing a bet: weak / mid / strong | facing a bet: weak / mid / strong |
+|---|---|---|
+| equilibrium | 0 everywhere | 0 everywhere |
+| maniac | raise +1.5 / +1.5 / +1.0 | fold −1.0, raise +1.0 (all buckets) |
+| station | call +0.5 (all buckets) | (−2.0, +1.5, −0.5) / (−2.0, +1.5, −0.5) / (−1.0, +1.0, −0.5) |
+| rock | raise −1.5 / −0.5 / 0 | (+1.5, 0, −1.5) / (+1.0, 0, −0.5) / 0 |
+| passive | raise −2.0 / −2.0 / −1.5 | call +0.5 and raise −2.0 / −2.0 / −1.5 |
+
+Population `M = 256` (seed `[seed, 1]`). Opponent sets:
 **in-pop**, 64 evenly spaced members of the population (the Bayes prior is well specified); **fresh**,
 64 new draws from the same prior (seed `[seed, 2]`; the prior's support misses them).
 
@@ -90,7 +100,8 @@ Before every later block the agent estimates `θ̂` from all hands so far with p
 
 - **bayes**: discounted posterior over the 256-member population (prior uniform), estimate = its
   sequence-form mixture. Under adaptation or for fresh opponents the model is misspecified.
-- **em**: prior-free MAP, Dirichlet(4 · `s~`) per opponent infoset, EM over the hidden card,
+- **em**: prior-free posterior mode with 4 · `s~` pseudo-observations per opponent infoset (the
+  MAP under Dirichlet(4 · `s~` + 1)), EM over the hidden card,
   30 iterations warm-started from the previous block's estimate.
 
 Methods: `nash`, `br`, `hard` (m = 10), `soft` (k = 10), `rnr_lo` (p = 0.5), `rnr_hi` (p = 0.8).
@@ -117,7 +128,8 @@ draws are seeded per (opponent, block, hand), identical across configs.
   improves `rnr_*`'s.
 - **E5-4 (prior)**: in-pop, `bayes` beats `em` for every method over the session; on fresh
   opponents the gap shrinks.
-- **E5-5 (partial locks)**: in Leduc, with ~234 opponent infosets per seat and 512 hands, hard and
+- **E5-5 (partial locks)**: in Leduc, with 468 opponent infosets per seat (erratum: first written
+  as ~234; infosets keep suits, so counts split across suit-equivalent infosets) and 512 hands, hard and
   soft locks stay within 0.05 chips/hand of `nash`; the robustness they buy is bought more cheaply
   by RNR.
 

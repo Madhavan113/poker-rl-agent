@@ -92,7 +92,7 @@ class LockedCFR:
     ``seat`` is our (free) seat; ``batch`` the number of independent instances. Call ``solve``
     repeatedly with changing locks: regrets persist between calls (warm start), the average is
     restarted at every call. ``reset`` drops the regrets. A warm start helps when the lock drifts
-    slightly and can be a little worse than a cold start after a large change; switching between
+    slightly (single-solve iterates match the unscaled update up to rounding) and can be a little worse than a cold start after a large change; switching between
     node-lock and RNR games resets the adversary's regrets. After each call ``adversary`` holds the
     adversary's average strategy, which certifies the solution through ``duality_gap``.
     """
@@ -318,7 +318,13 @@ def duality_gap(
     opp = 1 - seat
     if (conf is None) == (rnr_p is None):
         raise ValueError("give exactly one of conf and rnr_p")
+    rows = tree.infoset_rows[opp]
+    adversary = np.asarray(adversary, dtype=np.float64)
+    _check_rows(adversary[rows], tree.infoset_legal[rows].astype(np.float64), "adversary")
     if conf is not None:
+        c = np.asarray(conf, dtype=np.float64).reshape(tree.n_infosets)[rows, None]
+        if np.any(adversary[rows] < c * np.asarray(lock, dtype=np.float64)[rows] - 1e-9):
+            raise ValueError("adversary is not of the form conf * lock + (1 - conf) * tau")
         lower = restricted_value(game, seat, ours, lock, conf)
         target = np.asarray(adversary, dtype=np.float64)
     else:
@@ -329,7 +335,10 @@ def duality_gap(
     cf = tree.reach_chance * tree.reach(rho, opp)
     u, _ = tree.best_response_pass(sigma, seat, cf)
     upper = float(u[tree.root]) * (1.0 if seat == 0 else -1.0)
-    return upper - lower
+    gap = upper - lower
+    if gap < -1e-8:
+        raise ValueError(f"negative duality gap {gap:.3g}: inputs are inconsistent")
+    return gap
 
 
 def _mix_two(tree: CompiledTree, a: np.ndarray, b: np.ndarray, w_a: float, seat: int) -> np.ndarray:
