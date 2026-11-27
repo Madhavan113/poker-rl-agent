@@ -288,6 +288,15 @@ once sessions exceed a few thousand tokens; heads for action, value, and opponen
   semantics of §2.5. Identity inference (H1 as written) is under-resolved and the wrong target; E2 replaces
   it with a decision-relevant KL. No information seeking, as expected for these agents (§2.3).
 
+- **E5 (2026-11-26, `docs/experiments/e5-population-nodelock-results.md`)**: in Leduc, the best response to the
+  population posterior captures 92% of the oracle's edge against static opponents (+0.49 chips/hand over Nash). Against
+  an opponent that moves 10% toward a best response every 32 hands it loses 0.40/hand to Nash (bayes, γ = 1). RNR(0.5)
+  keeps a non-negative session gain everywhere (+0.19 static, +0.07 at that adaptation rate), drifting at most 0.038
+  below Nash late against fast adapters. With the population posterior, soft node locks match its gain per unit of
+  exploitability (2.97 vs 2.82; with em RNR(0.5) leads, 3.24 vs 2.39) at about a sixth of the scale; hard locks are
+  dominated. Only ~2.4% of opponent infosets see 10 observations in 480 hands, which is why
+  per-node locks earn little. The open problem is choosing the trust level online.
+
 ## 11. Decision log
 
 - 2026-09-13 — Start in Kuhn, not Leduc or HUNL: every quantity exact, so the first plots are
@@ -304,3 +313,6 @@ once sessions exceed a few thousand tokens; heads for action, value, and opponen
   unbalanced opponent and re-solve, versus plain CFR and versus full best response. A Kuhn prototype put
   most of the value in inference (population prior) and RNR mixing, not in partial node locks; E5 tests
   that in Leduc with opponents that adapt. E4's perturbed-CFR population is built inside E5.
+- 2026-11-26 — After E5: RNR is the main exploitation knob and soft locks the conservative option; hard locks stay
+  only as a baseline. Next is E5b (choose p or the lock confidence online, safe-exploitation style), then realistic
+  adapters and leak-model-level prior-free inference.
