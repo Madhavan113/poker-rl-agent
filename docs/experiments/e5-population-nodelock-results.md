@@ -93,7 +93,7 @@ best-performing inference and γ per method and η:
 | E5-1: static ranking br ≥ rnr_hi ≥ soft ≥ hard ≥ nash | **PASS** | holds for both inferences at γ = 1 (soft and hard within one s.e. there); at γ = 0.8 too |
 | E5-2: at η = 0.3, br's late gain < 0, and the best late gain is an RNR config | **FAIL** (first clause passes) | br late −0.92 to −1.12. The best late gains are hard and soft (em, γ = .8, +0.011 ± 0.0015 and +0.011 ± 0.001), slightly above rnr_lo (+0.009 ± 0.002): all about Nash. rnr_lo has the best *session* gain (+0.036). |
 | E5-3: forgetting helps br more than RNR under adaptation | **FAIL** | holds in 3 of the 8 set × η × inference cells. In-pop, true only for bayes at η = 0.1 (br late −0.682 → −0.356); on fresh also at η = 0.3 with bayes (br +0.113 vs rnr_hi +0.044 / rnr_lo +0.010). At η = 0.3 in-pop with bayes it helps br and rnr_hi about equally (+0.044 / +0.049). With em, forgetting makes br worse (−0.021 / −0.030 in-pop) and helps rnr_hi at both η and rnr_lo at η = 0.3 (+0.028; flat at η = 0.1). |
-| E5-4: in-pop, bayes beats em for every method; the gap shrinks on fresh | **PARTIAL** | at η = 0, γ = 1: bayes > em for all five methods, by 0.005 (hard) to 0.278 (br), and the br and RNR gaps shrink on fresh (by 0.0075 to 0.042, at both γ); the soft and hard gaps are unchanged within noise (soft's grows by 0.00004 at γ = 0.8). Under adaptation em is often better: br (γ = 1), hard and soft at η = 0.1; the best soft/hard/rnr_lo configs at η = 0.3 are em. |
+| E5-4: in-pop, bayes beats em for every method; the gap shrinks on fresh | **PARTIAL** | at η = 0, γ = 1: bayes > em for all five methods, by 0.005 (hard) to 0.278 (br), and the br and RNR gaps shrink on fresh (by 0.0075 to 0.043, at both γ); the soft and hard gaps are unchanged within noise (soft's grows by 0.00004 at γ = 0.8). Under adaptation em is often better: br (γ = 1), hard and soft at η = 0.1; the best soft/hard/rnr_lo configs at η = 0.3 are em. |
 | E5-5: hard/soft within 0.05 of Nash; RNR buys robustness more cheaply | **PARTIAL** | first clause passes (max \|gain\| 0.032 session, 0.046 late). RNR beats hard on gain and exploitability. Against soft it is mixed: per unit of exploitability they are level with bayes (2.82 vs 2.97) and rnr_lo is ahead with em (3.24 vs 2.39); at η = 0.3 soft's late gain is ≥ rnr_lo's in all 8 configs but rnr_lo's session gain is higher in 6 of 8; at η = 0.1 rnr_lo leads on both in all 8. |
 
 ## Findings
@@ -137,7 +137,7 @@ best-performing inference and γ per method and η:
 
 - RNR is the main exploitation knob and soft locks are the conservative option. Hard locks are
   dominated on session gain and exploitability in every condition here (on second-half gain at
-  η = 0.3 they tie soft) and stay only as a baseline.
+  η = 0.3 with em, γ = .8, they tie soft for the best of any method) and stay only as a baseline.
 - **E5b: choose p online.** For example, safe exploitation (Ganzfried & Sandholm 2015): risk only
   what has been won so far, and lower p when realized EV falls below the model's prediction, which is
   a direct signal of adaptation. Target: rnr_hi's static gain with soft's worst case. A soft lock
